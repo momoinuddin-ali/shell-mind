@@ -1,4 +1,6 @@
-__pycache__/
-*.pychf_cache/
+hf_cache/
+venv_linux/
 supervisor/logs.db
+supervisor/thinking.log
 __pycache__/
+primary_node/__pycache__/
