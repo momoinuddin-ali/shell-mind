@@ -1,36 +1,37 @@
-import requests
-import subprocess
-import sys
-from supervisor.safety import is_safe, log_action
+import os, sys, requests
 
-SERVER = "http://localhost:8000"
+DEFAULT_LOCAL = "http://localhost:8000"
 
-def ask_ai(prompt, persona):
+def get_server_choice():
+    print("\n=== Shell-Mind ===")
+    print("1) Use Moin's Omen as Remote Server (Long Distance - Fast, 8B)")
+    print("2) Use Local Small Model (True Offline - Works on No dGPU)")
+    choice = input("Choose [1/2]: ").strip()
+    if choice == "1":
+        # Ask for IP
+        default_remote = os.getenv("SHELL_MIND_SERVER", "")
+        print(f"\nEnter Moin's Tailscale IP (e.g. 100.x.x.x:8000)")
+        if default_remote: print(f"Press Enter to use saved: {default_remote}")
+        ip = input("Remote URL: ").strip() or default_remote
+        if not ip.startswith("http"): ip = f"http://{ip}"
+        if ":8000" not in ip: ip = ip.rstrip("/") + ":8000"
+        return ip
+    else:
+        print("\nStarting local CPU model... Make sure you ran: uvicorn primary_node.ai_core:app --host 0.0.0.0 --port 8000")
+        return DEFAULT_LOCAL
+
+SERVER_URL = get_server_choice()
+print(f"\nConnected to: {SERVER_URL}\n")
+
+while True:
+    prompt = input("you> ").strip()
+    if not prompt: continue
+    if prompt in ["exit","quit"]: break
     try:
-        r = requests.post(f"{SERVER}/chat",
-            json={"prompt": prompt, "persona": persona, "max_tokens": 400},
-            stream=True, timeout=120
-        )
+        r = requests.post(f"{SERVER_URL}/chat", json={"prompt": prompt}, stream=True, timeout=120)
+        print("ai> ", end="")
         for chunk in r.iter_content(decode_unicode=True):
-            if chunk:
-                print(chunk, end="", flush=True)
-        print()
+            if chunk: print(chunk, end="", flush=True)
+        print("\n")
     except Exception as e:
-        print(f"[Server not running? Start uvicorn first] {e}")
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python shell_mind_cli.py explain 'ls -la'")
-        sys.exit(0)
-    cmd = sys.argv[1]
-    if cmd == "explain":
-        user_cmd = " ".join(sys.argv[2:])
-        if not is_safe(user_cmd):
-            print(f"BLOCKED by supervisor: {user_cmd}")
-            log_action(f"explain {user_cmd}", user_cmd, blocked=True)
-            sys.exit(1)
-        ask_ai(f"Explain this linux command in simple terms: {user_cmd}", "You are a Linux expert. Explain commands simply.")
-        log_action(f"explain {user_cmd}", user_cmd, blocked=False)
-    elif cmd == "write":
-        task = " ".join(sys.argv[2:])
-        ask_ai(f"Write a linux shell command for: {task}. Give command only plus one line explanation.", "You are a helpful shell assistant.")
+        print(f"[Error] Server not reachable at {SERVER_URL}. Is Moin's laptop ON? {e}")
