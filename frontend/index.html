@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Local AI Workspace — Shell-Mind</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!--Outer container of the web app-->
+<div class="app">
+  <div class="titlebar">
+    <span id="clock">--:--</span>
+    <div class="status-dot" id="statusDot"></div>
+  </div>
+
+  <div class="body-row">
+
+    <!-- Sidebar -->
+    <div class="sidebar">
+      <div class="brand">⚡ Local AI Workspace</div>
+      <button class="new-chat-btn" id="newChatBtn">+ New chat</button>
+
+      <div class="divider"></div>
+      <div class="section-label">CHAT THREADS</div>
+      <div class="threads" id="threadList">
+        <!-- JS yahan thread history dalega -->
+      </div>
+
+      <div class="divider"></div>
+      <div class="section-label">DOCUMENT RAG</div>
+      <div class="upload-btn" id="uploadBtn">↑ Upload PDF</div>
+      <input type="file" id="pdfInput" accept="application/pdf" style="display:none;">
+      <div class="hint">200MB per file</div>
+    </div>
+
+    <!-- Main chat -->
+    <div class="main">
+      <!-- chat-container: iske andar ka content hi center mein rehta hai,
+           sidebar aur backend-bar poori width lete hain -->
+      <div class="chat-container">
+        <div class="messages" id="messages">
+          <div class="empty-state" id="emptyState">
+            <div class="empty-title">New chat</div>
+            <div class="empty-sub">Everything below runs entirely on this laptop — nothing leaves the device.</div>
+            <div class="chips">
+              <div class="chip" data-text="Summarize a PDF">Summarize a PDF</div>
+              <div class="chip" data-text="Explain a concept">Explain a concept</div>
+              <div class="chip" data-text="Write & debug code">Write & debug code</div>
+              <div class="chip" data-text="Draft an email">Draft an email</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="input-row">
+          <div class="input-box">
+            <input type="text" id="promptInput" placeholder="Ask your local model anything...">
+            <button class="send-btn" id="sendBtn">➤</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>

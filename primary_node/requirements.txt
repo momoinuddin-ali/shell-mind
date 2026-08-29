@@ -4,8 +4,3 @@ bitsandbytes
 accelerate
 fastapi
 uvicorn
-//hardware requirements
-dgpu with atleast 8GB VRAM
-compatible CUDA version installed
-compatible CPU and sufficient RAM (16GB or more recommended)gradio
-requests
