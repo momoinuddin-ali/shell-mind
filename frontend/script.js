@@ -1,6 +1,4 @@
-
 const SERVER_URL = "http://localhost:8000"; 
-
 
 let currentThread = [];      // abhi chal rahi chat ke messages
 let allThreads = [];         // sab purani chats ki list (sirf is session ke liye, refresh pe reset)
@@ -36,10 +34,6 @@ setInterval(updateClock, 1000 * 30);
 
 /* ===============================================================
    5) BACKEND HEALTH CHECK
-   Server zinda hai ya nahi, ye check karne ke liye ek GET request
-   maarte hain. Agar shell-mind mein "/health" route nahi hai to
-   ye fail hoga — tab bhi UI kaam karega, bas dot yellow rahega jab
-   tak tum message bhejo.
    =============================================================== */
 async function checkBackend() {
   try {
@@ -105,11 +99,17 @@ async function sendMessage(text) {
   showTypingIndicator();
 
   try {
+    // Grab the selected mode from the UI Dropdown (CPU, GPU, or Agent)
+    const selectedMode = document.getElementById('modeSelect').value;
+
     // 2. shell-mind server ko POST /chat call karo
     const res = await fetch(`${SERVER_URL}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: text })
+      body: JSON.stringify({ 
+        prompt: text,
+        mode: selectedMode 
+      })
     });
 
     removeTypingIndicator();
@@ -118,8 +118,9 @@ async function sendMessage(text) {
       throw new Error(`Server returned status ${res.status}`);
     }
 
-    // ui.py ke Gradio wrapper ke hisaab se response plain text hai
-    const replyText = await res.text();
+    // Parse the JSON response to extract just the "answer" text
+    const data = await res.json();
+    const replyText = data.answer;
 
     currentThread.push({ role: 'bot', text: replyText });
     statusDot.style.background = '#3FB950'; // connect ho gaya, dot green
@@ -184,8 +185,7 @@ function renderThreadList() {
   });
 }
 
-// PDF upload — file select karke server ko /upload route par bhejta hai
-// (shell-mind ke upload route ka naam apne backend code se confirm kar lena)
+// PDF upload
 uploadBtn.addEventListener('click', () => pdfInput.click());
 pdfInput.addEventListener('change', async () => {
   const file = pdfInput.files[0];

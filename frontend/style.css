@@ -122,4 +122,20 @@ body {
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
   cursor: pointer; border: none; color: #1E1503; font-weight: 700; font-size: 14px;
 }
-.send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.send-btn:disabled { opacity: 0.5; cursor: not-allowed; }/* ===== Mode Selector Dropdown ===== */
+.mode-dropdown {
+  background: #252D3A; 
+  border: 0.5px solid #8A6A24; 
+  color: #E8E6DE;
+  font-size: 11px; 
+  padding: 8px; 
+  border-radius: 5px; 
+  width: 100%;
+  margin-bottom: 14px; 
+  outline: none; 
+  cursor: pointer;
+  font-family: inherit;
+}
+.mode-dropdown:hover {
+  background: #2C3646;
+}

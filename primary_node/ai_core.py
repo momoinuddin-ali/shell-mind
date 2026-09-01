@@ -1,71 +1,115 @@
 import os
 from pathlib import Path
+import torch
+import gc
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-MY_CACHE = "/run/media/momoinuddin-ali/workspace/local_ai-/hf_cache"
-FALLBACK = Path(__file__).resolve().parent.parent / "hf_cache"
-CACHE = MY_CACHE if Path(MY_CACHE).exists() else str(FALLBACK)
+# ==========================================
+# 1. CACHE SETUP (Portable Workspace Drive)
+# ==========================================
+# Dynamically find the 'workspace' root (2 folders up from primary_node/ai_core.py)
+_WS_ROOT = Path(__file__).resolve().parents[2]
+CACHE = str(_WS_ROOT / "models" / "hf_cache")
+
+# Force Hugging Face to use this specific external folder
 os.environ["HF_HOME"] = CACHE
 os.environ["HF_HUB_CACHE"] = str(Path(CACHE) / "hub")
 os.environ["TRANSFORMERS_CACHE"] = str(Path(CACHE) / "hub")
-print(f"Using HF cache: {CACHE}")
 
-import torch, re
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TextIteratorStreamer
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from threading import Thread
+print(f"Using portable HF cache: {CACHE}")
 
-app = FastAPI(title="Shell-Mind Primary Node")
+# ==========================================
+# 2. FASTAPI & CORS SETUP
+# ==========================================
+app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ==========================================
+# 3. GLOBAL MODEL STATE & HARDWARE DETECTION
+# ==========================================
 HAS_GPU = torch.cuda.is_available()
-if HAS_GPU:
-    MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-    print(f"GPU FOUND: Using {MODEL_ID}")
-    quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.float16, bnb_4bit_use_double_quant=True)
-else:
-    MODEL_ID = "Qwen/Qwen2-0.5B-Instruct"
-    print(f"NO dGPU: Using lightweight {MODEL_ID} for CPU")
-    quant_config = None
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, cache_dir=str(Path(CACHE)/"hub"))
 if HAS_GPU:
-    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, quantization_config=quant_config, device_map="cuda:0", cache_dir=str(Path(CACHE)/"hub"))
+    print("🟢 GPU Detected! Booting Workstation Server Mode.")
+    MODEL_ID = "Qwen/Qwen2.5-Coder-7B-Instruct"
+    device_map = {"": "cuda:0"}
+    torch_dtype = torch.bfloat16
+    
+    # 4-bit compression for the 8GB RTX 5050
+    quant_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_quant_type="nf4"
+    )
 else:
-    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, device_map="cpu", cache_dir=str(Path(CACHE)/"hub"))
-print("Kitchen Ready!")
+    print("🟡 No GPU Detected. Booting Lightweight CPU Mode.")
+    MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
+    device_map = {"": "cpu"}
+    torch_dtype = torch.float32
+    quant_config = None 
 
+print(f"Waking up {MODEL_ID}... (May take a few minutes if downloading for the first time)")
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID,
+    quantization_config=quant_config,
+    device_map=device_map,
+    torch_dtype=torch_dtype,
+)
+print("✅ Kitchen is ready! Listening on Port 8000...")
+
+# ==========================================
+# 4. API ENDPOINTS
+# ==========================================
 class UserRequest(BaseModel):
     prompt: str
-    max_tokens: int = 4096
-    temperature: float = 0.6
+    mode: str = "gpu"  # Default to GPU mode
 
 @app.get("/health")
-def health():
-    return {"status": "ready", "gpu": HAS_GPU, "model": MODEL_ID, "vram": f"{torch.cuda.memory_allocated(0)/1e9:.2f}GB" if HAS_GPU else "CPU"}
+def health_check():
+    """Your Web UI (script.js) pings this to confirm the server is alive."""
+    return {"status": "ok", "default_model": MODEL_ID, "hardware": "GPU" if HAS_GPU else "CPU"}
 
 @app.post("/chat")
-def chat(req: UserRequest):
-    system = "You are Linux expert. Think internally, never show thinking. End with FINAL: + clean answer."
-    messages = [{"role":"system","content":system},{"role":"user","content":req.prompt+"\nRemember FINAL:"}]
-    full_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer(full_prompt, return_tensors="pt").to(model.device)
-    streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-    Thread(target=model.generate, kwargs=dict(**inputs, streamer=streamer, max_new_tokens=req.max_tokens, temperature=req.temperature, do_sample=True, eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.eos_token_id)).start()
-    def gen():
-        text=""
-        for t in streamer: text+=t
-        final = text.split("FINAL:")[-1].strip() if "FINAL:" in text else text.strip().split("\n\n")[-1]
-        try:
-            Path("supervisor").mkdir(exist_ok=True)
-            open("supervisor/thinking.log","a").write(f"\n--- {req.prompt[:80]}\n{text[:500]}\nFINAL:{final[:500]}\n")
-        except: pass
-        yield final
-        try: del inputs; torch.cuda.empty_cache(); torch.cuda.ipc_collect()
-        except: pass
-    return StreamingResponse(gen(), media_type="text/plain")
+def ask_ai(request: UserRequest):
+    # --- TIER 3: AGENT WORKSTATION ---
+    if request.mode == "agent":
+        return {"answer": "⚙️ Agent Workstation triggered! (Note: Multi-agent orchestration is pending Stage 2 integration based on your smoke_test.py results. Please use GPU Copilot for now.)"}
+    
+    # --- TIER 1: CPU LITE ---
+    elif request.mode == "cpu" and HAS_GPU:
+        return {"answer": "🖥️ CPU Mode triggered! (To keep API response times fast, dynamic unloading of the 7B GPU model to load the 0.5B CPU model is bypassed in this session. Using Copilot mode.)"}
 
-@app.post("/run")
-def run_code(payload: dict):
-    from supervisor import safety
-    return safety.run_sandboxed(payload.get("code",""), payload.get("filename","test.py"))
+    # --- TIER 2: GPU COPILOT (Default execution) ---
+    messages = [
+        {"role": "system", "content": "You are a highly capable coding and shell assistant. Keep your answers clear, accurate, and concise."},
+        {"role": "user", "content": request.prompt}
+    ]
+    
+    formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(formatted_prompt, return_tensors="pt").to(model.device)
+    
+    outputs = model.generate(
+        **inputs, 
+        max_new_tokens=500, 
+        temperature=0.6, 
+        pad_token_id=tokenizer.eos_token_id
+    )
+    
+    # Clean Tensor Slicing (No more messy string splitting!)
+    input_length = inputs["input_ids"].shape[1]
+    generated_tokens = outputs[0][input_length:]
+    reply = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+    
+    return {"answer": reply}

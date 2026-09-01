@@ -32,6 +32,14 @@
       <input type="file" id="pdfInput" accept="application/pdf" style="display:none;">
       <div class="hint">200MB per file</div>
     </div>
+    <!-- Add this right below your Document RAG section in index.html -->
+      <div class="divider"></div>
+      <div class="section-label">COMPUTE MODE</div>
+      <select id="modeSelect" class="mode-dropdown">
+        <option value="cpu">CPU Lite (0.5B - Fast)</option>
+        <option value="gpu" selected>GPU Copilot (7B - Standard)</option>
+        <option value="agent">Agent Workstation (Multi-Model)</option>
+      </select>
 
     <!-- Main chat -->
     <div class="main">
