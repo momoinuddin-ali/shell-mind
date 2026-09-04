@@ -1,0 +1,6 @@
+nohup: ignoring input
+[90mHint: A new version of huggingface_hub (1.30.0) is available! You are using version 1.27.0.
+To update, run: hf update[0m
+[90mHint: The `hf-cli` skill is not installed. Run `hf skills add -g --claude` to teach your AI agents how to use the `hf` CLI.[0m
+Fetching 16 files:   0%|          | 0/16 [00:00<?, ?it/s]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Fetching 16 files:   6%|▋         | 1/16 [00:00<00:04,  3.35it/s]Fetching 16 files:  31%|███▏      | 5/16 [00:00<00:00, 14.47it/s]Fetching 16 files:  50%|█████     | 8/16 [00:00<00:00, 13.36it/s]Fetching 16 files:  62%|██████▎   | 10/16 [00:01<00:00,  7.33it/s]Fetching 16 files:  75%|███████▌  | 12/16 [00:01<00:00,  6.00it/s]

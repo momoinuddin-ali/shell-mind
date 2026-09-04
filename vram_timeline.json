@@ -1,0 +1,50 @@
+[
+  {
+    "t": 1640.521,
+    "event": "init",
+    "free_gb": 6.43,
+    "torch_reserved_gb": 0.0
+  },
+  {
+    "t": 1646.123,
+    "event": "resident:router",
+    "free_gb": 5.36,
+    "torch_reserved_gb": 1.13
+  },
+  {
+    "t": 1648.371,
+    "event": "resident_unloaded:router",
+    "free_gb": 6.41,
+    "torch_reserved_gb": 0.06
+  },
+  {
+    "t": 1662.563,
+    "event": "loaded:coder7",
+    "free_gb": 1.08,
+    "torch_reserved_gb": 5.4
+  },
+  {
+    "t": 1664.437,
+    "event": "unloaded:coder7",
+    "free_gb": 6.42,
+    "torch_reserved_gb": 0.06
+  },
+  {
+    "t": 1669.748,
+    "event": "resident:router",
+    "free_gb": 5.25,
+    "torch_reserved_gb": 1.15
+  },
+  {
+    "t": 1681.558,
+    "event": "loaded:critic",
+    "free_gb": 2.78,
+    "torch_reserved_gb": 3.66
+  },
+  {
+    "t": 1684.842,
+    "event": "unloaded:critic",
+    "free_gb": 5.31,
+    "torch_reserved_gb": 1.15
+  }
+]

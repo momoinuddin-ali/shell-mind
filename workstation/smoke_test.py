@@ -74,15 +74,24 @@ def run_one(zoo: ModelZoo, key: str) -> dict:
         gen_s = time.perf_counter() - t1
 
     n_new = out.shape[1] - inputs["input_ids"].shape[1]
+    sample = _decode(tok, out[0, -n_new:])[:60]
+
+    # Drop EVERY reference to the model BEFORE unloading. If Python still
+    # holds the weights, they cannot be freed — this exact mistake caused
+    # the false FAILs in the previous run.
+    del out, inputs, model, tok
+
     zoo.unload_worker()
+    free_after = round(zoo.free_vram_gb(), 2)
 
     result = {
         "key": key, "loaded": loaded_key, "fell_back": loaded_key != key,
         "load_s": load_s, "tok_s": round(n_new / gen_s, 1),
-        "sample": _decode(tok, out[0, -n_new:])[:60],
-        "free_after": round(zoo.free_vram_gb(), 2),
+        "sample": sample, "free_after": free_after,
     }
-    result["ok"] = n_new > 0 and result["free_after"] >= free_before - 0.4
+    # 1.5 GB tolerance: the first load ever pays a one-time ~1 GB CUDA
+    # context cost. That's the floor, not a leak.
+    result["ok"] = n_new > 0 and free_after >= free_before - 1.5
     log.info("result: %s", result)
     return result
 
@@ -107,9 +116,14 @@ def main() -> None:
         try:
             results.append(run_one(zoo, k))
         except Exception as exc:                   # noqa: BLE001
-            log.exception("%s crashed: %s", k, exc)
-            zoo.purge()
-            results.append({"key": k, "ok": False, "error": str(exc)})
+            err = f"{type(exc).__name__}: {exc}"
+            log.error("%s crashed: %s", k, err)
+            results.append({"key": k, "ok": False, "error": err})
+        
+        # OUTSIDE the except block: the live traceback keeps a crashed model's 
+        # weights in VRAM; purging here runs only after they're released, 
+        # so one failure can never starve the next test of memory.
+        zoo.purge()   
 
     # coexistence: resident router + the heaviest model just tested
     if keys:

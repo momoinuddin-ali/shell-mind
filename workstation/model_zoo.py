@@ -31,6 +31,9 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 # so the same launcher works for every tool on this laptop.
 os.environ.setdefault("__NV_PRIME_RENDER_OFFLOAD", "1")
 os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
+# Fight VRAM fragmentation on an 8GB card (PyTorch itself recommends
+# this in your OOM warning).
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 # Portable cache, resolved relative to this file — identical on
 # /run/media/<user>/<uuid>/workspace/... and D:\workspace\...
@@ -64,7 +67,7 @@ class ModelSpec:
 
 
 REGISTRY: dict[str, ModelSpec] = {
-    "router":  ModelSpec("router",  "Qwen/Qwen2.5-1.5B-Instruct",     "router",  1.2, False, None),
+    "router":  ModelSpec("router",  "Qwen/Qwen2.5-1.5B-Instruct",        "router",  1.2, False, None),
     "vision":  ModelSpec("vision",  "Qwen/Qwen3-VL-8B-Instruct",         "vision",  6.0, False, None, vision=True),
     "coder30": ModelSpec("coder30", "Qwen/Qwen3-Coder-30B-A3B-Instruct", "coder",   6.0, True,  "coder7"),
     "coder7":  ModelSpec("coder7",  "Qwen/Qwen2.5-Coder-7B-Instruct",    "coder",   5.2, False, None),
@@ -93,6 +96,14 @@ class ModelZoo:
 
         self.timeline: list[dict[str, Any]] = []   # VRAM samples -> portfolio graph
         self._probe("init")
+
+    @property
+    def worker_key(self) -> Optional[str]:
+        return self._worker_key
+
+    @property
+    def resident_key(self) -> Optional[str]:
+        return self._resident_key
 
     # -- VRAM accounting ----------------------------------------------------
     def free_vram_gb(self) -> float:
@@ -227,7 +238,14 @@ class ModelZoo:
             "resident": self._resident_key,
             "worker": self._worker_key,
         }
-
+    def has_model(self, key: str) -> bool:
+        """True if this model's weights are fully in the local cache."""
+        spec = REGISTRY[key]
+        hub = Path(os.environ.get("HF_HUB_CACHE",
+                                  str(Path(os.environ["HF_HOME"]) / "hub")))
+        snaps = hub / f"models--{spec.hf_id.replace('/', '--')}" / "snapshots"
+        return bool(any(snaps.glob("*/*.safetensors")))
+    
     def dump_timeline(self, path: str | Path = "vram_timeline.json") -> None:
         """VRAM-over-time log — this is the data behind the portfolio chart."""
         Path(path).write_text(json.dumps(self.timeline, indent=2))
