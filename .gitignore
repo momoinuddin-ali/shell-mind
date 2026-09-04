@@ -4,3 +4,6 @@ supervisor/logs.db
 supervisor/thinking.log
 __pycache__/
 primary_node/__pycache__/
+downloads.log
+vram_timeline.json
+__pycache__/
