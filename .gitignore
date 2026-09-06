@@ -7,3 +7,5 @@ primary_node/__pycache__/
 downloads.log
 vram_timeline.json
 __pycache__/
+shell_mind_history.db
+*.db
