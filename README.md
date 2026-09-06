@@ -40,3 +40,5 @@ This architecture is decoupled. The backend and frontend must be started separat
 Ensure your virtual environment is active, then launch the backend server:
 ```bash
 uvicorn primary_node.ai_core:app --host 0.0.0.0 --port 8000
+**3. Database Auditing**
+Upon the first boot, the backend automatically generates an SQLite database file (`shell_mind_history.db`) in the root directory. You can open this file using any standard SQLite viewer (like DB Browser for SQLite) to audit the execution modes, prompts, file attachments, and AI outputs of every session.
