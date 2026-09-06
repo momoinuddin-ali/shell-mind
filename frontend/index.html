@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Local AI Workspace — Shell-Mind</title>
 <link rel="stylesheet" href="style.css">
 </head>
@@ -13,50 +14,56 @@
   </div>
 
   <div class="body-row">
-
     <!-- Sidebar -->
     <div class="sidebar">
       <div class="brand">⚡ Local AI Workspace</div>
-      <button class="new-chat-btn" id="newChatBtn">+ New chat</button>
+      <button class="new-chat-btn" id="newChatBtn">➕ New Chat</button>
 
       <div class="divider"></div>
-      <div class="section-label">CHAT THREADS</div>
+      <div class="section-label">💬 CHAT THREADS</div>
       <div class="threads" id="threadList"></div>
-
-      <div class="divider"></div>
-      <div class="section-label">DOCUMENT RAG</div>
-      <div class="upload-btn" id="uploadBtn">↑ Upload PDF</div>
-      <input type="file" id="pdfInput" accept="application/pdf" style="display:none;">
-      <div class="hint">200MB per file</div>
       
       <div class="divider"></div>
-      <div class="section-label">COMPUTE MODE</div>
+      <div class="section-label">📁 DOCUMENT RAG (200MB LIMIT)</div>
+      <div class="upload-zone" id="uploadZone" title="Click to upload PDFs">
+        <div class="upload-icon">📄</div>
+        <div class="upload-text">Upload PDF Context</div>
+        <input type="file" id="pdfInput" accept="application/pdf" style="display:none;">
+      </div>
+
+      <div class="divider"></div>
+      <div class="section-label">⚙️ COMPUTE MODE</div>
       <select id="modeSelect" class="mode-dropdown">
         <option value="cpu">CPU Lite (0.5B - Fast)</option>
         <option value="gpu" selected>GPU Copilot (7B - Standard)</option>
         <option value="agent">Agent Workstation (Multi-Model)</option>
       </select>
+      
+      <button class="clear-all-btn" id="clearAllBtn">🔥 Clear All Data</button>
     </div>
 
     <!-- Main chat -->
     <div class="main">
       <div class="backend-bar" id="backendBar">Backend: Initializing...</div>
       <div class="chat-container">
+        
         <div class="messages" id="messages">
           <div class="empty-state" id="emptyState">
-            <div class="empty-title">New chat</div>
-            <div class="empty-sub">Everything below runs entirely on this laptop — nothing leaves the device.</div>
+            <div class="empty-title">New Chat</div>
+            <div class="empty-sub">Backend: RTX 5050 4-Bit | 100% Local Processing</div>
             <div class="chips">
-              <div class="chip" data-text="Summarize a PDF">Summarize a PDF</div>
-              <div class="chip" data-text="Explain a concept">Explain a concept</div>
-              <div class="chip" data-text="Write & debug code">Write & debug code</div>
-              <div class="chip" data-text="Draft an email">Draft an email</div>
+              <div class="chip" data-text="Analyze a C++ pointer error">Analyze C++ bug</div>
+              <div class="chip" data-text="Explain the multi-agent architecture">Explain Architecture</div>
+              <div class="chip" data-text="Write a bash script to clear cache">Write Bash Script</div>
             </div>
           </div>
         </div>
 
-        <div id="imageIndicator" style="display:none; color:#C99B3D; font-size:11px; padding: 0 24px 5px 24px;">
-          📎 Attached: <span id="imageName"></span>
+        <div id="imageIndicator" class="attachment-indicator" style="display:none;">
+          📎 Attached Image: <span id="imageName"></span>
+        </div>
+        <div id="pdfIndicator" class="attachment-indicator" style="display:none; color: #4A90E2;">
+          📄 Attached PDF: <span id="pdfName"></span>
         </div>
         
         <div class="input-row">
@@ -70,7 +77,6 @@
         </div>
       </div>
     </div>
-
   </div>
 </div>
 

@@ -1,134 +1,50 @@
 [
   {
-    "t": 656.128,
+    "t": 6619.29,
     "event": "init",
-    "free_gb": 0.94,
-    "torch_reserved_gb": 5.61
+    "free_gb": 6.51,
+    "torch_reserved_gb": 0.0
   },
   {
-    "t": 672.009,
+    "t": 6623.957,
     "event": "resident:router",
-    "free_gb": 5.44,
+    "free_gb": 5.39,
     "torch_reserved_gb": 1.13
   },
   {
-    "t": 673.821,
+    "t": 6626.667,
     "event": "resident_unloaded:router",
-    "free_gb": 6.51,
-    "torch_reserved_gb": 0.06
+    "free_gb": 6.46,
+    "torch_reserved_gb": 0.04
   },
   {
-    "t": 690.243,
+    "t": 6641.277,
     "event": "loaded:thinker",
-    "free_gb": 0.67,
+    "free_gb": 0.64,
     "torch_reserved_gb": 5.83
   },
   {
-    "t": 703.787,
+    "t": 6680.088,
     "event": "unloaded:thinker",
-    "free_gb": 6.47,
-    "torch_reserved_gb": 0.06
+    "free_gb": 6.46,
+    "torch_reserved_gb": 0.04
   },
   {
-    "t": 707.946,
+    "t": 6684.956,
     "event": "resident:router",
-    "free_gb": 5.4,
-    "torch_reserved_gb": 1.15
-  },
-  {
-    "t": 716.838,
-    "event": "loaded:critic",
-    "free_gb": 2.89,
-    "torch_reserved_gb": 3.66
-  },
-  {
-    "t": 719.446,
-    "event": "unloaded:critic",
-    "free_gb": 5.44,
-    "torch_reserved_gb": 1.15
-  },
-  {
-    "t": 870.66,
-    "event": "resident_unloaded:router",
-    "free_gb": 6.48,
-    "torch_reserved_gb": 0.06
-  },
-  {
-    "t": 882.995,
-    "event": "loaded:coder7",
-    "free_gb": 1.15,
-    "torch_reserved_gb": 5.4
-  },
-  {
-    "t": 897.828,
-    "event": "unloaded:coder7",
-    "free_gb": 6.5,
-    "torch_reserved_gb": 0.06
-  },
-  {
-    "t": 902.094,
-    "event": "resident:router",
-    "free_gb": 5.42,
-    "torch_reserved_gb": 1.15
-  },
-  {
-    "t": 910.015,
-    "event": "loaded:critic",
-    "free_gb": 2.9,
-    "torch_reserved_gb": 3.66
-  },
-  {
-    "t": 932.751,
-    "event": "unloaded:critic",
-    "free_gb": 5.42,
-    "torch_reserved_gb": 1.15
-  },
-  {
-    "t": 1445.973,
-    "event": "resident_unloaded:router",
-    "free_gb": 6.44,
-    "torch_reserved_gb": 0.06
-  },
-  {
-    "t": 3208.478,
-    "event": "resident:router",
-    "free_gb": 5.32,
-    "torch_reserved_gb": 1.15
-  },
-  {
-    "t": 3209.935,
-    "event": "resident_unloaded:router",
-    "free_gb": 6.39,
-    "torch_reserved_gb": 0.06
-  },
-  {
-    "t": 3223.602,
-    "event": "loaded:coder7",
-    "free_gb": 1.09,
-    "torch_reserved_gb": 5.4
-  },
-  {
-    "t": 3232.367,
-    "event": "unloaded:coder7",
-    "free_gb": 6.43,
-    "torch_reserved_gb": 0.06
-  },
-  {
-    "t": 3236.526,
-    "event": "resident:router",
-    "free_gb": 5.34,
-    "torch_reserved_gb": 1.15
-  },
-  {
-    "t": 3244.609,
-    "event": "loaded:critic",
-    "free_gb": 2.83,
-    "torch_reserved_gb": 3.66
-  },
-  {
-    "t": 3269.63,
-    "event": "unloaded:critic",
     "free_gb": 5.33,
+    "torch_reserved_gb": 1.15
+  },
+  {
+    "t": 6693.26,
+    "event": "loaded:critic",
+    "free_gb": 2.84,
+    "torch_reserved_gb": 3.66
+  },
+  {
+    "t": 6711.754,
+    "event": "unloaded:critic",
+    "free_gb": 5.36,
     "torch_reserved_gb": 1.15
   }
 ]

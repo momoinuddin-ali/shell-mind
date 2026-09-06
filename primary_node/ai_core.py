@@ -1,20 +1,5 @@
 """
 ai_core.py — SHELL MIND server (final merge: product layer + engine).
-
-Layers:
-  * THIS FILE: transport only — FastAPI, tiers, locking, mode switching.
-  * workstation/: the engine (models, agents, orchestration).
-
-Rules enforced here:
-  1. One generation at a time (GEN_LOCK) — the 8 GB card is zero-sum.
-  2. Tiers are exclusive: agent mode evicts the copilot; copilot mode
-     parks the workstation's resident router (measured: 5.2 + 1.2 GB
-     leaves 0.1 GB free — not enough for a real prompt's KV cache).
-  3. The copilot is never bricked: an evicted model reloads on demand.
-
-Launch (from the shell-mind repo root, venv active, ONE process only —
-multiple workers = multiple model zoos = OOM):
-    uvicorn primary_node.ai_core:app --host 0.0.0.0 --port 8000
 """
 
 import gc
@@ -23,6 +8,8 @@ import os
 import shutil
 import tempfile
 import threading
+import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
@@ -35,7 +22,38 @@ logging.basicConfig(level=logging.INFO,
                     datefmt="%H:%M:%S")
 
 # ==========================================
-# 1. CACHE SETUP (Portable Workspace Drive)
+# 0. DATABASE INITIALIZATION (For the Professor!)
+# ==========================================
+DB_PATH = "shell_mind_history.db"
+
+def init_db():
+    """Creates a local relational database to log all AI interactions."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS interactions
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  timestamp TEXT,
+                  compute_mode TEXT,
+                  prompt TEXT,
+                  response TEXT,
+                  attached_file TEXT)''')
+    conn.commit()
+    conn.close()
+    print(f"🗄️ Database initialized at {DB_PATH}")
+
+init_db()
+
+def log_to_db(mode: str, prompt: str, response: str, attached_file: str = "None"):
+    """Saves the chat to the SQLite database."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO interactions (timestamp, compute_mode, prompt, response, attached_file) VALUES (?, ?, ?, ?, ?)",
+              (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), mode, prompt, response, attached_file))
+    conn.commit()
+    conn.close()
+
+# ==========================================
+# 1. CACHE SETUP 
 # ==========================================
 _WS_ROOT = Path(__file__).resolve().parents[2]
 CACHE = str(_WS_ROOT / "models" / "hf_cache")
@@ -44,103 +62,59 @@ os.environ["HF_HOME"] = CACHE
 os.environ["HF_HUB_CACHE"] = str(Path(CACHE) / "hub")
 os.environ["TRANSFORMERS_CACHE"] = str(Path(CACHE) / "hub")
 
-print(f"Using portable HF cache: {CACHE}")
-
-# Engine imports AFTER the env is set
 from workstation.model_zoo import get_zoo                  # noqa: E402
 from workstation.orchestrator import run_agentic_pipeline  # noqa: E402
-
 import torch                                               # noqa: E402
-from transformers import (                                 # noqa: E402
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig,
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig # noqa: E402
 
 # ==========================================
-# 2. FASTAPI & CORS SETUP
+# 2. FASTAPI SETUP
 # ==========================================
 app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # ==========================================
-# 3. HARDWARE DETECTION & STARTUP MODEL
+# 3. HARDWARE DETECTION
 # ==========================================
 HAS_GPU = torch.cuda.is_available()
-
-# Pre-declare globals for strict type checkers (Pylance)
 model: Any = None
 tokenizer: Any = None
 
 if HAS_GPU:
-    print("🟢 GPU Detected! Booting Workstation Server Mode.")
     MODEL_ID = "Qwen/Qwen2.5-Coder-7B-Instruct"
     device_map: Union[Dict[str, Any], str] = {"": "cuda:0"}
     torch_dtype = torch.bfloat16
-    quant_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_quant_type="nf4",
-    )
+    quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4")
 else:
-    print("🟡 No GPU Detected. Booting Lightweight CPU Mode.")
     MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
     device_map = {"": "cpu"}
     torch_dtype = torch.float32
     quant_config = None
 
-print(f"Waking up {MODEL_ID}... (May take a few minutes if downloading for the first time)")
-
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_ID,
-    quantization_config=quant_config,
-    device_map=device_map,
-    torch_dtype=torch_dtype,
-)
-print("✅ Kitchen is ready! Listening on Port 8000...")
+model = AutoModelForCausalLM.from_pretrained(MODEL_ID, quantization_config=quant_config, device_map=device_map, torch_dtype=torch_dtype)
 
 # ==========================================
-# 4. MODE MANAGEMENT (VRAM is zero-sum!)
+# 4. MODE MANAGEMENT
 # ==========================================
 GEN_LOCK = threading.Lock()
 _tier: Dict[str, str] = {"current": "copilot"}
 
 def _evict_copilot() -> None:
     global model, tokenizer
-    if model is None:
-        return
+    if model is None: return
     model = None
     tokenizer = None
-    gc.collect()
-    gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.ipc_collect()
-    print("🛌 GPU Copilot evicted — the agent workstation owns the card now")
+    gc.collect(); gc.collect()
+    torch.cuda.empty_cache(); torch.cuda.ipc_collect()
 
 def _ensure_copilot() -> None:
     global model, tokenizer
-    if model is not None:
-        return
-    if HAS_GPU:
-        get_zoo().unload_resident()
-    print("🔄 Reloading GPU Copilot (was evicted for agent mode)...")
+    if model is not None: return
+    if HAS_GPU: get_zoo().unload_resident()
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
-        quantization_config=quant_config,
-        device_map=device_map,
-        torch_dtype=torch_dtype,
-    )
+    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, quantization_config=quant_config, device_map=device_map, torch_dtype=torch_dtype)
     _tier["current"] = "copilot"
-    print("✅ GPU Copilot back online")
 
 # ==========================================
 # 5. API ENDPOINTS
@@ -149,94 +123,78 @@ class UserRequest(BaseModel):
     prompt: str
     mode: str = "gpu"
     image_path: Optional[str] = None
+    document_path: Optional[str] = None  
 
 @app.get("/health")
 def health_check() -> Dict[str, Any]:
-    info: Dict[str, Any] = {
-        "status": "ok",
-        "default_model": MODEL_ID,
-        "hardware": "GPU" if HAS_GPU else "CPU",
-        "tier": _tier["current"],
-    }
-    if HAS_GPU:
-        try:
-            info["free_vram_gb"] = round(get_zoo().free_vram_gb(), 2)
-        except Exception:
-            pass    
-    return info
+    return {"status": "ok", "tier": _tier["current"]}
 
 @app.post("/upload_image")
 def upload_image_endpoint(file: UploadFile = File(...)) -> Dict[str, str]:
-    """Receives an image from the Web UI and stores it in /tmp for the Vision Agent."""
-    if not file.filename:
-        return {"image_path": ""}
-    temp_dir = tempfile.gettempdir()
-    temp_path = os.path.join(temp_dir, file.filename)
-    with open(temp_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    if not file.filename: return {"image_path": ""}
+    temp_path = os.path.join(tempfile.gettempdir(), file.filename)
+    with open(temp_path, "wb") as buffer: shutil.copyfileobj(file.file, buffer)
     return {"image_path": temp_path}
+
+@app.post("/upload")
+def upload_document_endpoint(file: UploadFile = File(...)) -> Dict[str, str]:
+    if not file.filename: return {"document_path": ""}
+    temp_path = os.path.join(tempfile.gettempdir(), file.filename)
+    with open(temp_path, "wb") as buffer: shutil.copyfileobj(file.file, buffer)
+    return {"document_path": temp_path, "status": "stored_for_processing"}
 
 @app.post("/chat")
 def ask_ai(request: UserRequest) -> Dict[str, Any]:
     with GEN_LOCK:
+        # --- PDF "LITE" EXTRACTION ---
+        pdf_context = ""
+        file_logged = "None"
+        if request.document_path and os.path.exists(request.document_path):
+            file_logged = os.path.basename(request.document_path)
+            try:
+                import PyPDF2
+                with open(request.document_path, "rb") as f:
+                    reader = PyPDF2.PdfReader(f)
+                    extracted = "".join([page.extract_text() or "" for page in reader.pages[:3]])
+                    pdf_context = f"\n\n[CONTEXT FROM UPLOADED PDF]:\n{extracted[:3000]}...\n\n"
+            except Exception as e:
+                print(f"⚠️ Failed to read PDF: {e}")
+
+        if request.image_path:
+            file_logged = os.path.basename(request.image_path)
+
+        final_prompt = request.prompt + pdf_context
+
         # --- TIER 3: AGENT WORKSTATION ---
         if request.mode == "agent":
-            if not HAS_GPU:
-                return {"answer": "🟡 Agent Workstation needs the GPU. This server booted in CPU Lite mode."}
             if _tier["current"] != "agent":
                 _evict_copilot()
                 _tier["current"] = "agent"
             try:
-                result = run_agentic_pipeline(request.prompt, image_path=request.image_path)
+                result = run_agentic_pipeline(final_prompt, image_path=request.image_path)
+                answer_text = f"🤖 Agent Workstation [{str(result.get('task', 'agent')).upper()}]\n\n{result.get('answer', '')}"
+                log_to_db("Agent Pipeline", request.prompt, answer_text, file_logged)
+                return {"answer": answer_text, "stages": result.get("stages"), "total_s": result.get("total_s")}
             except Exception as exc:
                 err_name = type(exc).__name__
-                err_msg = str(exc)
-                print(f"⚠️ Agent pipeline error: {err_name}: {err_msg}")
-                # CRITICAL: Drop the traceback BEFORE purging so VRAM actually frees!
                 del exc
                 get_zoo().purge()
                 return {"answer": f"⚠️ Agent pipeline error ({err_name}). VRAM purged — try again."}
-            
-            if isinstance(result, dict):
-                return {
-                    "answer": f"🤖 Agent Workstation [{str(result.get('task', 'agent')).upper()}]\n\n{result.get('answer', '')}",
-                    "stages": result.get("stages"),
-                    "total_s": result.get("total_s"),
-                }
-            return {"answer": str(result)}             
 
-        # --- TIER 1: CPU LITE ---
-        prefix = ""
-        if request.mode == "cpu" and HAS_GPU:
-            print("ℹ️ CPU tier requested — serving via GPU Copilot (fast path).")
-            prefix = "🖥️ (CPU tier routes through the GPU Copilot on this machine)\n\n"
-
-        # --- TIER 2: GPU COPILOT (default execution) ---
+        # --- TIER 1 & 2: CPU LITE / GPU COPILOT ---
         _ensure_copilot()
-
-        # Type guard to satisfy strict linters
-        if model is None or tokenizer is None:
-            return {"answer": "⚠️ Error: Copilot model is not loaded in memory."}
-
         messages = [
-            {"role": "system", "content": "You are a highly capable coding and shell assistant. Keep your answers clear, accurate, and concise."},
-            {"role": "user", "content": request.prompt},
+            {"role": "system", "content": "You are a highly capable coding assistant."},
+            {"role": "user", "content": final_prompt},
         ]
-
-        formatted_prompt = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True)
+        formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = tokenizer(formatted_prompt, return_tensors="pt").to(model.device)
 
         with torch.inference_mode():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=1500,
-                do_sample=True,
-                temperature=0.6,
-                pad_token_id=tokenizer.eos_token_id,
-            )
+            outputs = model.generate(**inputs, max_new_tokens=1500, do_sample=True, temperature=0.6, pad_token_id=tokenizer.eos_token_id)
 
         input_length = inputs["input_ids"].shape[1]
         reply = tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True).strip()
-
-        return {"answer": prefix + reply}
+        
+        log_to_db(request.mode.upper(), request.prompt, reply, file_logged)
+        return {"answer": reply}
