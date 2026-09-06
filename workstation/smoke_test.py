@@ -125,15 +125,21 @@ def main() -> None:
         # so one failure can never starve the next test of memory.
         zoo.purge()   
 
-    # coexistence: resident router + the heaviest model just tested
+    # coexistence: only for workers that coexist with the router BY DESIGN.
+    # Heavy workers (vision / coder7 / thinker / coder30) park the router
+    # in production — router + weights do not fit in 7.56 GB.
     if keys:
         coex_key = keys[-1]
-        log.info("--- coexistence: resident router + %s ---", coex_key)
-        zoo.load_resident("router")
-        zoo.load_worker(coex_key)
-        log.info("router + %s live together: %.1f GB VRAM still free",
-                 zoo.worker_key, zoo.free_vram_gb())
-        zoo.unload_worker()
+        if coex_key in ("router", "critic"):
+            log.info("--- coexistence: resident router + %s ---", coex_key)
+            zoo.load_resident("router")
+            zoo.load_worker(coex_key)
+            log.info("router + %s live together: %.1f GB VRAM still free",
+                     zoo.worker_key, zoo.free_vram_gb())
+            zoo.unload_worker()
+        else:
+            log.info("--- coexistence skipped for '%s': heavy workers park "
+                     "the router in production (by design) ---", coex_key)
 
     zoo.dump_timeline("vram_timeline.json")
 

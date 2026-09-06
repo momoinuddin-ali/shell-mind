@@ -1,26 +1,27 @@
 const SERVER_URL = "http://localhost:8000"; 
 
-let currentThread = [];      // abhi chal rahi chat ke messages
-let allThreads = [];         // sab purani chats ki list (sirf is session ke liye, refresh pe reset)
+let currentThread = [];      
+let allThreads = [];         
+let currentImagePath = null; // Holds the uploaded image for the next prompt
 
-/* ===============================================================
-   3) DOM REFERENCES — HTML elements ko JS variables mein pakadna
-   =============================================================== */
-const messagesEl   = document.getElementById('messages');
-const emptyStateEl = document.getElementById('emptyState');
-const promptInput  = document.getElementById('promptInput');
-const sendBtn      = document.getElementById('sendBtn');
-const statusDot    = document.getElementById('statusDot');
-const backendBar   = document.getElementById('backendBar');
-const threadListEl = document.getElementById('threadList');
-const newChatBtn   = document.getElementById('newChatBtn');
-const clockEl      = document.getElementById('clock');
-const uploadBtn    = document.getElementById('uploadBtn');
-const pdfInput     = document.getElementById('pdfInput');
+const messagesEl     = document.getElementById('messages');
+const emptyStateEl   = document.getElementById('emptyState');
+const promptInput    = document.getElementById('promptInput');
+const sendBtn        = document.getElementById('sendBtn');
+const statusDot      = document.getElementById('statusDot');
+const backendBar     = document.getElementById('backendBar');
+const threadListEl   = document.getElementById('threadList');
+const newChatBtn     = document.getElementById('newChatBtn');
+const clockEl        = document.getElementById('clock');
+const uploadBtn      = document.getElementById('uploadBtn');
+const pdfInput       = document.getElementById('pdfInput');
 
-/* ===============================================================
-   4) CLOCK — top bar mein time dikhana (sirf cosmetic)
-   =============================================================== */
+// Vision Upload Elements
+const attachBtn      = document.getElementById('attachBtn');
+const visionInput    = document.getElementById('visionInput');
+const imageIndicator = document.getElementById('imageIndicator');
+const imageName      = document.getElementById('imageName');
+
 function updateClock() {
   const now = new Date();
   let h = now.getHours();
@@ -32,44 +33,35 @@ function updateClock() {
 updateClock();
 setInterval(updateClock, 1000 * 30);
 
-/* ===============================================================
-   5) BACKEND HEALTH CHECK
-   =============================================================== */
 async function checkBackend() {
   try {
     const res = await fetch(`${SERVER_URL}/health`, { method: 'GET' });
     if (res.ok) {
-      statusDot.style.background = '#3FB950'; // green = connected
+      statusDot.style.background = '#3FB950'; 
       backendBar.textContent = `Backend: connected (${SERVER_URL}) · RAG supervisor active · local only`;
     } else {
       throw new Error('not ok');
     }
   } catch (e) {
-    statusDot.style.background = '#C99B3D'; // yellow = unknown / not confirmed
+    statusDot.style.background = '#C99B3D'; 
     backendBar.textContent = `Backend: ${SERVER_URL} (status unknown — will confirm on first message)`;
   }
 }
 checkBackend();
 
-/* ===============================================================
-   6) RENDER MESSAGES — chat bubbles ko screen par draw karna
-   =============================================================== */
 function renderMessages() {
   messagesEl.innerHTML = '';
-
   if (currentThread.length === 0) {
     messagesEl.appendChild(emptyStateEl);
     return;
   }
-
   currentThread.forEach(msg => {
     const div = document.createElement('div');
     div.className = `msg ${msg.role}${msg.error ? ' error' : ''}`;
     div.textContent = msg.text;
     messagesEl.appendChild(div);
   });
-
-  messagesEl.scrollTop = messagesEl.scrollHeight; // hamesha neeche scroll
+  messagesEl.scrollTop = messagesEl.scrollHeight; 
 }
 
 function showTypingIndicator() {
@@ -85,13 +77,9 @@ function removeTypingIndicator() {
   if (el) el.remove();
 }
 
-/* ===============================================================
-   7) SEND MESSAGE — ye asli "connect to backend" wala part hai
-   =============================================================== */
 async function sendMessage(text) {
   if (!text || !text.trim()) return;
 
-  // 1. user ka message turant screen par dikhao
   currentThread.push({ role: 'user', text: text });
   renderMessages();
   promptInput.value = '';
@@ -99,41 +87,42 @@ async function sendMessage(text) {
   showTypingIndicator();
 
   try {
-    // Grab the selected mode from the UI Dropdown (CPU, GPU, or Agent)
     const selectedMode = document.getElementById('modeSelect').value;
+    
+    // Attach the image path if one was uploaded
+    const payload = { prompt: text, mode: selectedMode };
+    if (currentImagePath) {
+      payload.image_path = currentImagePath;
+    }
 
-    // 2. shell-mind server ko POST /chat call karo
     const res = await fetch(`${SERVER_URL}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        prompt: text,
-        mode: selectedMode 
-      })
+      body: JSON.stringify(payload)
     });
 
     removeTypingIndicator();
 
-    if (!res.ok) {
-      throw new Error(`Server returned status ${res.status}`);
-    }
+    if (!res.ok) throw new Error(`Server returned status ${res.status}`);
 
-    // Parse the JSON response to extract just the "answer" text
     const data = await res.json();
-    const replyText = data.answer;
-
-    currentThread.push({ role: 'bot', text: replyText });
-    statusDot.style.background = '#3FB950'; // connect ho gaya, dot green
+    currentThread.push({ role: 'bot', text: data.answer });
+    statusDot.style.background = '#3FB950'; 
     backendBar.textContent = `Backend: connected (${SERVER_URL}) · RAG supervisor active · local only`;
+
+    // Clear the image attachment after a successful send
+    currentImagePath = null;
+    imageIndicator.style.display = 'none';
+    visionInput.value = "";
 
   } catch (err) {
     removeTypingIndicator();
     currentThread.push({
       role: 'bot',
       error: true,
-      text: `⚠ Server ${SERVER_URL} not reachable.\nCheck ki shell-mind backend (ai_core.py / supervisor) chal raha hai ya nahi, aur CORS enabled hai.\n\nDetail: ${err.message}`
+      text: `⚠ Server ${SERVER_URL} not reachable.\nDetail: ${err.message}`
     });
-    statusDot.style.background = '#B84A4A'; // red = error
+    statusDot.style.background = '#B84A4A'; 
   }
 
   renderMessages();
@@ -141,26 +130,17 @@ async function sendMessage(text) {
   promptInput.focus();
 }
 
-/* ===============================================================
-   8) EVENT LISTENERS — buttons aur inputs ko JS se jodna
-   =============================================================== */
-
-// Send button click
 sendBtn.addEventListener('click', () => sendMessage(promptInput.value));
-
-// Enter key se bhi bhej sako
 promptInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') sendMessage(promptInput.value);
 });
 
-// Suggestion chips par click karne se wo text seedha bhej jaye
 document.querySelectorAll('.chip').forEach(chip => {
   chip.addEventListener('click', () => {
     sendMessage(chip.getAttribute('data-text'));
   });
 });
 
-// New chat button — current thread ko save karke naya thread shuru karo
 newChatBtn.addEventListener('click', () => {
   if (currentThread.length > 0) {
     const title = currentThread[0].text.slice(0, 30) || 'New chat';
@@ -185,30 +165,49 @@ function renderThreadList() {
   });
 }
 
-// PDF upload
-uploadBtn.addEventListener('click', () => pdfInput.click());
-pdfInput.addEventListener('change', async () => {
-  const file = pdfInput.files[0];
+// Vision Upload Logic
+attachBtn.addEventListener('click', () => visionInput.click());
+visionInput.addEventListener('change', async () => {
+  const file = visionInput.files[0];
   if (!file) return;
 
   const formData = new FormData();
   formData.append('file', file);
 
   try {
-    const res = await fetch(`${SERVER_URL}/upload`, {
+    const res = await fetch(`${SERVER_URL}/upload_image`, {
       method: 'POST',
       body: formData
     });
     if (res.ok) {
-      currentThread.push({ role: 'bot', text: `📄 "${file.name}" uploaded for RAG indexing.` });
+      const data = await res.json();
+      currentImagePath = data.image_path;
+      imageName.textContent = file.name;
+      imageIndicator.style.display = 'block';
     } else {
       throw new Error(`status ${res.status}`);
     }
   } catch (err) {
-    currentThread.push({ role: 'bot', error: true, text: `⚠ Upload failed: ${err.message}. Check "/upload" route apne shell-mind server mein hai ya nahi.` });
+    alert("Image upload failed. Is the backend server running?");
+  }
+});
+
+// PDF upload logic remains unchanged
+uploadBtn.addEventListener('click', () => pdfInput.click());
+pdfInput.addEventListener('change', async () => {
+  const file = pdfInput.files[0];
+  if (!file) return;
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const res = await fetch(`${SERVER_URL}/upload`, { method: 'POST', body: formData });
+    if (res.ok) {
+      currentThread.push({ role: 'bot', text: `📄 "${file.name}" uploaded for RAG indexing.` });
+    } else throw new Error(`status ${res.status}`);
+  } catch (err) {
+    currentThread.push({ role: 'bot', error: true, text: `⚠ Upload failed: ${err.message}.` });
   }
   renderMessages();
 });
 
-// Initial render
 renderMessages();

@@ -26,17 +26,10 @@ from typing import Any, Optional
 
 # --- environment: BEFORE torch --------------------------------------------
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
-# These two only matter to OpenGL/Vulkan apps (the Fedora hybrid desktop).
-# CUDA never sees the AMD iGPU, so CUDA-only is automatic — set defensively
-# so the same launcher works for every tool on this laptop.
 os.environ.setdefault("__NV_PRIME_RENDER_OFFLOAD", "1")
 os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
-# Fight VRAM fragmentation on an 8GB card (PyTorch itself recommends
-# this in your OOM warning).
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-# Portable cache, resolved relative to this file — identical on
-# /run/media/<user>/<uuid>/workspace/... and D:\workspace\...
 _WS_ROOT = Path(__file__).resolve().parents[2]
 os.environ.setdefault("HF_HOME", str(_WS_ROOT / "models" / "hf_cache"))
 
@@ -51,7 +44,6 @@ from transformers import (  # noqa: E402
 
 log = logging.getLogger("shell-mind.zoo")
 
-
 # ---------------------------------------------------------------------------
 # registry — the single place to swap models
 # ---------------------------------------------------------------------------
@@ -65,7 +57,6 @@ class ModelSpec:
     fallback: Optional[str]   # registry key used if loading fails
     vision: bool = False
 
-
 REGISTRY: dict[str, ModelSpec] = {
     "router":  ModelSpec("router",  "Qwen/Qwen2.5-1.5B-Instruct",        "router",  1.2, False, None),
     "vision":  ModelSpec("vision",  "Qwen/Qwen3-VL-8B-Instruct",         "vision",  6.0, False, None, vision=True),
@@ -75,26 +66,21 @@ REGISTRY: dict[str, ModelSpec] = {
     "critic":  ModelSpec("critic",  "Qwen/Qwen3-4B-Instruct-2507",       "critic",  3.0, False, None),
 }
 
-
 class ModelZoo:
     """One resident model + one hot-swapped worker, with VRAM accounting."""
 
     def __init__(self, kv_headroom_gb: float = 1.5, cpu_ram_budget_gb: float = 13.0):
         if not torch.cuda.is_available():
-            raise RuntimeError(
-                "CUDA unavailable. The RTX 5050 is Blackwell (sm_120) and needs a "
-                "torch wheel built for CUDA 12.8+. Check with:\n"
-                "  python -c 'import torch; print(torch.__version__, torch.version.cuda'"
-            )
-        self.kv_headroom_gb = kv_headroom_gb       # reserved for KV cache + activations
-        self.cpu_ram_budget_gb = cpu_ram_budget_gb # MoE expert parking in DDR5
+            raise RuntimeError("CUDA unavailable.")
+        self.kv_headroom_gb = kv_headroom_gb
+        self.cpu_ram_budget_gb = cpu_ram_budget_gb
 
-        self._worker: Optional[tuple] = None       # (model, tokenizer-or-processor)
+        self._worker: Optional[tuple] = None
         self._worker_key: Optional[str] = None
         self._resident: Optional[tuple] = None
         self._resident_key: Optional[str] = None
 
-        self.timeline: list[dict[str, Any]] = []   # VRAM samples -> portfolio graph
+        self.timeline: list[dict[str, Any]] = []
         self._probe("init")
 
     @property
@@ -105,7 +91,6 @@ class ModelZoo:
     def resident_key(self) -> Optional[str]:
         return self._resident_key
 
-    # -- VRAM accounting ----------------------------------------------------
     def free_vram_gb(self) -> float:
         free_b, _total = torch.cuda.mem_get_info()
         return free_b / 1024**3
@@ -125,13 +110,13 @@ class ModelZoo:
     def _quant(vision: bool = False) -> BitsAndBytesConfig:
         kwargs: dict[str, Any] = {}
         if vision:
-            # quantize only the LLM; keep the vision tower + projector bf16
             kwargs["llm_int8_skip_modules"] = ["visual", "merger", "lm_head"]
         return BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch.bfloat16,
+            llm_int8_enable_fp32_cpu_offload=True,
             **kwargs,
         )
 
@@ -141,21 +126,27 @@ class ModelZoo:
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
 
-    # -- worker (hot-swapped) -------------------------------------------------
     def load_worker(self, key: str) -> tuple:
         """Load a worker, replacing the current one. Falls back along
         REGISTRY[key].fallback on any failure. Returns (model, tokenizer)."""
         spec = REGISTRY[key]
+        err: str | None = None
+        
         try:
             model, tok = self._load_spec(spec)
         except Exception as exc:
-            log.warning("load '%s' (%s) failed: %s", key, spec.hf_id, exc, exc_info=True)
-            self.purge()
-            if spec.fallback:
-                fb = REGISTRY[spec.fallback]
-                log.warning(">>> falling back to '%s' (%s)", fb.key, fb.hf_id)
-                return self.load_worker(fb.key)
-            raise
+            if spec.fallback is None:
+                raise
+            # Convert to string to drop traceback references before purging
+            err = f"{type(exc).__name__}: {exc}"
+
+        if err is not None:
+            log.warning("load '%s' (%s) failed: %s — purging, then falling back to '%s'",
+                        key, spec.hf_id, err, spec.fallback)
+            self.purge()  
+            log.info(">>> falling back to '%s' (%s)", spec.fallback, REGISTRY[spec.fallback].hf_id)
+            return self.load_worker(spec.fallback)
+
         self._worker, self._worker_key = (model, tok), key
         self._probe(f"loaded:{key}")
         return model, tok
@@ -166,22 +157,27 @@ class ModelZoo:
         log.info("loading %s [%s] ...", spec.hf_id, spec.role)
 
         if spec.cpu_offload:
-            # MoE: fill the GPU first, park the rest (experts) in DDR5.
             gpu = self._gpu_budget_gb()
             max_memory = {0: f"{gpu:.2f}GiB", "cpu": f"{self.cpu_ram_budget_gb:.2f}GiB"}
             device_map: Any = "auto"
             log.info("offload plan: GPU %.1f GiB + CPU %.1f GiB", gpu, self.cpu_ram_budget_gb)
         else:
             max_memory = None
-            device_map = {"": 0}   # whole model on the 5050
+            device_map = {"": 0}
 
         cls = AutoModelForImageTextToText if spec.vision else AutoModelForCausalLM
+        
+        # Ensure offload directory exists for disk spilling
+        offload_dir = _WS_ROOT / "offload_cache"
+        offload_dir.mkdir(exist_ok=True)
+
         model = cls.from_pretrained(
             spec.hf_id,
             device_map=device_map,
             max_memory=max_memory,
             torch_dtype="auto",
             quantization_config=self._quant(vision=spec.vision),
+            offload_folder=str(offload_dir), 
         )
         model.eval()
         tok = (AutoProcessor if spec.vision else AutoTokenizer).from_pretrained(spec.hf_id)
@@ -199,7 +195,6 @@ class ModelZoo:
         self._probe(f"unloaded:{key}")
         log.info("worker '%s' unloaded | %.1f GB VRAM free", key, self.free_vram_gb())
 
-    # -- resident (router) -----------------------------------------------------
     def load_resident(self, key: str = "router") -> tuple:
         if self._resident_key == key:
             return self._resident
@@ -217,8 +212,6 @@ class ModelZoo:
         return self._resident
 
     def unload_resident(self) -> None:
-        """Parks the router — the orchestrator calls this before the vision
-        stage, when every last GB of VRAM matters."""
         if self._resident is None:
             return
         key = self._resident_key
@@ -226,7 +219,6 @@ class ModelZoo:
         self._release()
         self._probe(f"resident_unloaded:{key}")
 
-    # -- recovery & introspection ------------------------------------------------
     def purge(self) -> None:
         self._worker, self._worker_key = None, None
         self._release()
@@ -238,8 +230,8 @@ class ModelZoo:
             "resident": self._resident_key,
             "worker": self._worker_key,
         }
+        
     def has_model(self, key: str) -> bool:
-        """True if this model's weights are fully in the local cache."""
         spec = REGISTRY[key]
         hub = Path(os.environ.get("HF_HUB_CACHE",
                                   str(Path(os.environ["HF_HOME"]) / "hub")))
@@ -247,10 +239,8 @@ class ModelZoo:
         return bool(any(snaps.glob("*/*.safetensors")))
     
     def dump_timeline(self, path: str | Path = "vram_timeline.json") -> None:
-        """VRAM-over-time log — this is the data behind the portfolio chart."""
         Path(path).write_text(json.dumps(self.timeline, indent=2))
         log.info("VRAM timeline -> %s (%d samples)", path, len(self.timeline))
-
 
 _ZOO: Optional[ModelZoo] = None
 

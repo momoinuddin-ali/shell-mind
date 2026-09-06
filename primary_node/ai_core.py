@@ -18,14 +18,18 @@ multiple workers = multiple model zoos = OOM):
 """
 
 import gc
+import logging
 import os
+import shutil
+import tempfile
 import threading
 from pathlib import Path
+from typing import Any, Dict, Optional, Union
 
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import logging
+
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)-7s %(message)s",
                     datefmt="%H:%M:%S")
@@ -33,8 +37,6 @@ logging.basicConfig(level=logging.INFO,
 # ==========================================
 # 1. CACHE SETUP (Portable Workspace Drive)
 # ==========================================
-# Same path math as workstation/model_zoo.py: shell-mind/../models/hf_cache.
-# One cache for both layers — zero duplicate downloads.
 _WS_ROOT = Path(__file__).resolve().parents[2]
 CACHE = str(_WS_ROOT / "models" / "hf_cache")
 
@@ -44,13 +46,12 @@ os.environ["TRANSFORMERS_CACHE"] = str(Path(CACHE) / "hub")
 
 print(f"Using portable HF cache: {CACHE}")
 
-# Engine imports AFTER the env is set (model_zoo also sets its CUDA env
-# defensively — this ordering keeps everything consistent).
-from workstation.model_zoo import get_zoo                    # noqa: E402
-from workstation.orchestrator import run_agentic_pipeline    # noqa: E402
+# Engine imports AFTER the env is set
+from workstation.model_zoo import get_zoo                  # noqa: E402
+from workstation.orchestrator import run_agentic_pipeline  # noqa: E402
 
-import torch                                                  # noqa: E402
-from transformers import (                                    # noqa: E402
+import torch                                               # noqa: E402
+from transformers import (                                 # noqa: E402
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
@@ -74,10 +75,14 @@ app.add_middleware(
 # ==========================================
 HAS_GPU = torch.cuda.is_available()
 
+# Pre-declare globals for strict type checkers (Pylance)
+model: Any = None
+tokenizer: Any = None
+
 if HAS_GPU:
     print("🟢 GPU Detected! Booting Workstation Server Mode.")
     MODEL_ID = "Qwen/Qwen2.5-Coder-7B-Instruct"
-    device_map = {"": "cuda:0"}
+    device_map: Union[Dict[str, Any], str] = {"": "cuda:0"}
     torch_dtype = torch.bfloat16
     quant_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -105,31 +110,22 @@ print("✅ Kitchen is ready! Listening on Port 8000...")
 # ==========================================
 # 4. MODE MANAGEMENT (VRAM is zero-sum!)
 # ==========================================
-# One generation at a time, ever. The browser AND the CLI can both be
-# connected — they must queue here, not fight over the 8 GB card.
 GEN_LOCK = threading.Lock()
-_tier = {"current": "copilot"}   # honest: startup just loaded the copilot
-
+_tier: Dict[str, str] = {"current": "copilot"}
 
 def _evict_copilot() -> None:
-    """Free the GPU Copilot so the agent workstation can take the card.
-    References dropped BEFORE empty_cache — the smoke-test lesson: VRAM
-    cannot free while Python still holds the weights."""
     global model, tokenizer
     if model is None:
         return
     model = None
     tokenizer = None
-    gc.collect(); gc.collect()
+    gc.collect()
+    gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.ipc_collect()
     print("🛌 GPU Copilot evicted — the agent workstation owns the card now")
 
-
 def _ensure_copilot() -> None:
-    """(Re)load the GPU Copilot after agent mode evicted it. Parks the
-    workstation's resident router first: copilot (5.2 GB) + router
-    (1.2 GB) = 0.1 GB free — measured, and not enough for a real prompt."""
     global model, tokenizer
     if model is not None:
         return
@@ -146,20 +142,17 @@ def _ensure_copilot() -> None:
     _tier["current"] = "copilot"
     print("✅ GPU Copilot back online")
 
-
 # ==========================================
 # 5. API ENDPOINTS
 # ==========================================
 class UserRequest(BaseModel):
     prompt: str
-    mode: str = "gpu"               # "gpu" | "cpu" | "agent"
-    image_path: str | None = None   # future GUI: screenshot for the vision expert
-
+    mode: str = "gpu"
+    image_path: Optional[str] = None
 
 @app.get("/health")
-def health_check():
-    """Your Web UI (script.js) pings this to confirm the server is alive."""
-    info = {
+def health_check() -> Dict[str, Any]:
+    info: Dict[str, Any] = {
         "status": "ok",
         "default_model": MODEL_ID,
         "hardware": "GPU" if HAS_GPU else "CPU",
@@ -169,45 +162,50 @@ def health_check():
         try:
             info["free_vram_gb"] = round(get_zoo().free_vram_gb(), 2)
         except Exception:
-            pass    # never let a VRAM probe kill the health check
+            pass    
     return info
 
+@app.post("/upload_image")
+def upload_image_endpoint(file: UploadFile = File(...)) -> Dict[str, str]:
+    """Receives an image from the Web UI and stores it in /tmp for the Vision Agent."""
+    if not file.filename:
+        return {"image_path": ""}
+    temp_dir = tempfile.gettempdir()
+    temp_path = os.path.join(temp_dir, file.filename)
+    with open(temp_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    return {"image_path": temp_path}
 
 @app.post("/chat")
-def ask_ai(request: UserRequest):
+def ask_ai(request: UserRequest) -> Dict[str, Any]:
     with GEN_LOCK:
-
         # --- TIER 3: AGENT WORKSTATION ---
         if request.mode == "agent":
             if not HAS_GPU:
-                return {"answer": "🟡 Agent Workstation needs the GPU. "
-                                  "This server booted in CPU Lite mode."}
+                return {"answer": "🟡 Agent Workstation needs the GPU. This server booted in CPU Lite mode."}
             if _tier["current"] != "agent":
                 _evict_copilot()
                 _tier["current"] = "agent"
             try:
-                result = run_agentic_pipeline(request.prompt,
-                                              image_path=request.image_path)
+                result = run_agentic_pipeline(request.prompt, image_path=request.image_path)
             except Exception as exc:
-                # Purge and keep serving — a failed pipeline must never
-                # take the server down with it.
+                err_name = type(exc).__name__
+                err_msg = str(exc)
+                print(f"⚠️ Agent pipeline error: {err_name}: {err_msg}")
+                # CRITICAL: Drop the traceback BEFORE purging so VRAM actually frees!
+                del exc
                 get_zoo().purge()
-                print(f"⚠️ Agent pipeline error: {type(exc).__name__}: {exc}")
-                return {"answer": f"⚠️ Agent pipeline error "
-                                  f"({type(exc).__name__}). VRAM purged — try again."}
-            if isinstance(result, dict):          # current orchestrator
+                return {"answer": f"⚠️ Agent pipeline error ({err_name}). VRAM purged — try again."}
+            
+            if isinstance(result, dict):
                 return {
-                    "answer": f"🤖 Agent Workstation "
-                              f"[{str(result.get('task', 'agent')).upper()}]\n\n"
-                              f"{result.get('answer', '')}",
+                    "answer": f"🤖 Agent Workstation [{str(result.get('task', 'agent')).upper()}]\n\n{result.get('answer', '')}",
                     "stages": result.get("stages"),
                     "total_s": result.get("total_s"),
                 }
-            return {"answer": result}             # older orchestrator returned a string
+            return {"answer": str(result)}             
 
         # --- TIER 1: CPU LITE ---
-        # On GPU machines the CPU tier is served by the copilot (fast path)
-        # instead of a costly 7B->0.5B swap on every request.
         prefix = ""
         if request.mode == "cpu" and HAS_GPU:
             print("ℹ️ CPU tier requested — serving via GPU Copilot (fast path).")
@@ -215,6 +213,10 @@ def ask_ai(request: UserRequest):
 
         # --- TIER 2: GPU COPILOT (default execution) ---
         _ensure_copilot()
+
+        # Type guard to satisfy strict linters
+        if model is None or tokenizer is None:
+            return {"answer": "⚠️ Error: Copilot model is not loaded in memory."}
 
         messages = [
             {"role": "system", "content": "You are a highly capable coding and shell assistant. Keep your answers clear, accurate, and concise."},
@@ -228,14 +230,13 @@ def ask_ai(request: UserRequest):
         with torch.inference_mode():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=500,
+                max_new_tokens=1500,
                 do_sample=True,
                 temperature=0.6,
                 pad_token_id=tokenizer.eos_token_id,
             )
 
         input_length = inputs["input_ids"].shape[1]
-        reply = tokenizer.decode(outputs[0][input_length:],
-                                 skip_special_tokens=True).strip()
+        reply = tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True).strip()
 
         return {"answer": prefix + reply}

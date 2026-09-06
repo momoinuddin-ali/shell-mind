@@ -6,7 +6,6 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<!--Outer container of the web app-->
 <div class="app">
   <div class="titlebar">
     <span id="clock">--:--</span>
@@ -22,17 +21,14 @@
 
       <div class="divider"></div>
       <div class="section-label">CHAT THREADS</div>
-      <div class="threads" id="threadList">
-        <!-- JS yahan thread history dalega -->
-      </div>
+      <div class="threads" id="threadList"></div>
 
       <div class="divider"></div>
       <div class="section-label">DOCUMENT RAG</div>
       <div class="upload-btn" id="uploadBtn">↑ Upload PDF</div>
       <input type="file" id="pdfInput" accept="application/pdf" style="display:none;">
       <div class="hint">200MB per file</div>
-    </div>
-    <!-- Add this right below your Document RAG section in index.html -->
+      
       <div class="divider"></div>
       <div class="section-label">COMPUTE MODE</div>
       <select id="modeSelect" class="mode-dropdown">
@@ -40,11 +36,11 @@
         <option value="gpu" selected>GPU Copilot (7B - Standard)</option>
         <option value="agent">Agent Workstation (Multi-Model)</option>
       </select>
+    </div>
 
     <!-- Main chat -->
     <div class="main">
-      <!-- chat-container: iske andar ka content hi center mein rehta hai,
-           sidebar aur backend-bar poori width lete hain -->
+      <div class="backend-bar" id="backendBar">Backend: Initializing...</div>
       <div class="chat-container">
         <div class="messages" id="messages">
           <div class="empty-state" id="emptyState">
@@ -59,8 +55,15 @@
           </div>
         </div>
 
+        <div id="imageIndicator" style="display:none; color:#C99B3D; font-size:11px; padding: 0 24px 5px 24px;">
+          📎 Attached: <span id="imageName"></span>
+        </div>
+        
         <div class="input-row">
           <div class="input-box">
+            <button class="attach-btn" id="attachBtn" title="Attach Image">📎</button>
+            <input type="file" id="visionInput" accept="image/png, image/jpeg" style="display:none;">
+            
             <input type="text" id="promptInput" placeholder="Ask your local model anything...">
             <button class="send-btn" id="sendBtn">➤</button>
           </div>
