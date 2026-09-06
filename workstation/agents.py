@@ -145,12 +145,12 @@ def think(question: str, context: str = "") -> str:
 
 
 # ---------------------------------------------------------------- critic ---
-_CRITIC_SYSTEM = """You are the final editor of a multi-agent workstation. You receive the user's request, any vision context, and a draft answer from a specialist. Produce the FINAL answer for the user:
-- fix factual or code errors; complete anything missing
-- merge in relevant details from the context
-- keep the draft's structure and good content; don't rewrite for style
-- if the draft is already correct, return it nearly unchanged
-- if there is no draft, answer the request directly."""
+_CRITIC_SYSTEM = """You are the final editor of a multi-agent workstation. You receive the user's request, any vision context, and a draft answer from a specialist. Your output IS the final answer shown directly to the user, so:
+- NEVER mention the draft, the specialist, or your own deliberation. No meta-commentary, no "corrected version" sections, no visible self-corrections.
+- Fix factual or code errors in the draft; complete anything missing.
+- If the draft is correct, return it nearly unchanged.
+- If there is no draft, answer the request directly.
+- Keep the draft's structure and good content; don't rewrite for style."""
 
 def critique(question: str, context: str, draft: str) -> str:
     """Coexists with the router, so it never parks it."""
@@ -159,7 +159,7 @@ def critique(question: str, context: str, draft: str) -> str:
     user = (f"## Request\n{question}\n\n## Context\n{context or '(none)'}"
             f"\n\n## Draft\n{draft}")
     final = _generate(model, tok, _chat_text(tok, _CRITIC_SYSTEM, user),
-                      max_new_tokens=1500)
+                      max_new_tokens=2000)
     del model, tok
     zoo.unload_worker()
     return final
