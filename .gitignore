@@ -8,4 +8,10 @@ downloads.log
 vram_timeline.json
 __pycache__/
 shell_mind_history.db
-*.db
+*.dbshell_mind_history.db
+vram_timeline.json
+uploads/
+offload_cache/
+downloads.log
+__pycache__/
+supervisor/
