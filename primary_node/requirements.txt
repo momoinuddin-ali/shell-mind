@@ -1,6 +1,10 @@
-torch
-transformers
-bitsandbytes
+# Reference environment: RTX 5050 / Blackwell CUDA stack.
+torch==2.13.0
+transformers==5.16.1
+bitsandbytes==0.50.0
 accelerate
 fastapi
 uvicorn
+requests
+pillow
+PyPDF2

@@ -67,30 +67,35 @@ def see(image_path: str | Path, question: str) -> str:
     from PIL import Image
     zoo = get_zoo()
     zoo.unload_resident()
-    
-    model, proc = zoo.load_worker("vision")
-    img = Image.open(image_path).convert("RGB")
-    # 768 caps KV cache to guarantee it fits safely in the final 0.2GB of VRAM
-    img.thumbnail((768, 768))   
-    msgs = [{"role": "user", "content": [
-        {"type": "image", "image": img},
-        {"type": "text", "text":
-            f"{_VISION_SYSTEM}\n\nContext question: {question}"},
-    ]}]
-    inputs = proc.apply_chat_template(msgs, add_generation_prompt=True,
-                                      return_dict=True)
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
-    
-    with torch.inference_mode():
-        out = model.generate(**inputs, max_new_tokens=280, do_sample=False)
-    summary = proc.batch_decode(out, skip_special_tokens=True)[0].strip()
-    
-    # Nuke local references and wake the router ONLY on success.
-    # If a crash happens, it bubbles up cleanly without reloading the router.
-    del model, proc, inputs, out, img, msgs        
-    zoo.unload_worker()
-    zoo.load_resident("router")              
-    return summary
+    model = proc = img = inputs = out = msgs = None
+    try:
+        model, proc = zoo.load_worker("vision")
+        img = Image.open(image_path).convert("RGB")
+        img.thumbnail((1408, 1408))
+        msgs = [{"role": "user", "content": [
+            {"type": "image", "image": img},
+            {"type": "text", "text":
+                f"{_VISION_SYSTEM}\n\nContext question: {question}"},
+        ]}]
+        inputs = proc.apply_chat_template(msgs, add_generation_prompt=True,
+                                          return_dict=True)
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+        with torch.inference_mode():
+            out = model.generate(**inputs, max_new_tokens=280, do_sample=False)
+        summary = proc.batch_decode(out, skip_special_tokens=True)[0].strip()
+
+        del model, proc, inputs, out, img, msgs
+        zoo.unload_worker()
+        return summary
+    finally:
+        model = proc = img = inputs = out = msgs = None
+        zoo.unload_worker()
+        try:
+            zoo.load_resident("router")
+        except Exception:
+            log.warning("router wake failed after vision stage — "
+                        "it will lazy-reload on the next request")
 
 
 # ----------------------------------------------------------------- coder ---
@@ -111,16 +116,25 @@ def code(question: str, context: str = "", prompt_tokens: int = 0) -> str:
         log.info("coder: using Qwen2.5-Coder-7B%s",
                  "" if prompt_tokens >= 4000 else " (30B bypassed)")
     
-    zoo.unload_resident()                        
-    model, tok = zoo.load_worker("coder30" if use30 else "coder7")
-    user = (f"Context:\n{context}\n\n" if context else "") + question
-    draft = _generate(model, tok, _chat_text(tok, _CODER_SYSTEM, user),
-                      max_new_tokens=1200)
-    
-    del model, tok
-    zoo.unload_worker()
-    zoo.load_resident("router")              
-    return draft
+    zoo.unload_resident()
+    model = tok = None
+    try:
+        model, tok = zoo.load_worker("coder30" if use30 else "coder7")
+        user = (f"Context:\n{context}\n\n" if context else "") + question
+        draft = _generate(model, tok, _chat_text(tok, _CODER_SYSTEM, user),
+                          max_new_tokens=1200)
+
+        del model, tok
+        zoo.unload_worker()
+        return draft
+    finally:
+        model = tok = None
+        zoo.unload_worker()
+        try:
+            zoo.load_resident("router")
+        except Exception:
+            log.warning("router wake failed after coder stage — "
+                        "it will lazy-reload on the next request")
 
 
 # --------------------------------------------------------------- thinker ---
@@ -132,16 +146,24 @@ def think(question: str, context: str = "") -> str:
     an 8B worker needs the same headroom the coder does."""
     zoo = get_zoo()
     zoo.unload_resident()
-    
-    model, tok = zoo.load_worker("thinker")
-    user = (f"Context:\n{context}\n\n" if context else "") + question
-    draft = _generate(model, tok, _chat_text(tok, _THINK_SYSTEM, user),
-                      max_new_tokens=2500)
-    
-    del model, tok
-    zoo.unload_worker()
-    zoo.load_resident("router")
-    return draft
+    model = tok = None
+    try:
+        model, tok = zoo.load_worker("thinker")
+        user = (f"Context:\n{context}\n\n" if context else "") + question
+        draft = _generate(model, tok, _chat_text(tok, _THINK_SYSTEM, user),
+                          max_new_tokens=2500)
+
+        del model, tok
+        zoo.unload_worker()
+        return draft
+    finally:
+        model = tok = None
+        zoo.unload_worker()
+        try:
+            zoo.load_resident("router")
+        except Exception:
+            log.warning("router wake failed after thinker stage — "
+                        "it will lazy-reload on the next request")
 
 
 # ---------------------------------------------------------------- critic ---
@@ -155,14 +177,19 @@ _CRITIC_SYSTEM = """You are the final editor of a multi-agent workstation. You r
 def critique(question: str, context: str, draft: str) -> str:
     """Coexists with the router, so it never parks it."""
     zoo = get_zoo()
-    model, tok = zoo.load_worker("critic")
-    user = (f"## Request\n{question}\n\n## Context\n{context or '(none)'}"
-            f"\n\n## Draft\n{draft}")
-    final = _generate(model, tok, _chat_text(tok, _CRITIC_SYSTEM, user),
-                      max_new_tokens=2000)
-    del model, tok
-    zoo.unload_worker()
-    return final
+    model = tok = None
+    try:
+        model, tok = zoo.load_worker("critic")
+        user = (f"## Request\n{question}\n\n## Context\n{context or '(none)'}"
+                f"\n\n## Draft\n{draft}")
+        final = _generate(model, tok, _chat_text(tok, _CRITIC_SYSTEM, user),
+                          max_new_tokens=2000)
+        del model, tok
+        zoo.unload_worker()
+        return final
+    finally:
+        model = tok = None
+        zoo.unload_worker()
 
 
 def main() -> None:

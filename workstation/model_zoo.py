@@ -107,16 +107,18 @@ class ModelZoo:
         return max(self.free_vram_gb() - self.kv_headroom_gb, 2.0)
 
     @staticmethod
-    def _quant(vision: bool = False) -> BitsAndBytesConfig:
+    def _quant(vision: bool = False,
+               fp32_cpu_offload: bool = False) -> BitsAndBytesConfig:
         kwargs: dict[str, Any] = {}
         if vision:
             kwargs["llm_int8_skip_modules"] = ["visual", "merger", "lm_head"]
+        if fp32_cpu_offload:
+            kwargs["llm_int8_enable_fp32_cpu_offload"] = True
         return BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch.bfloat16,
-            llm_int8_enable_fp32_cpu_offload=True,
             **kwargs,
         )
 
@@ -176,7 +178,10 @@ class ModelZoo:
             device_map=device_map,
             max_memory=max_memory,
             torch_dtype="auto",
-            quantization_config=self._quant(vision=spec.vision),
+            quantization_config=self._quant(
+                vision=spec.vision,
+                fp32_cpu_offload=spec.cpu_offload,
+            ),
             offload_folder=str(offload_dir), 
         )
         model.eval()

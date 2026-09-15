@@ -111,7 +111,10 @@ def _evict_copilot() -> None:
 def _ensure_copilot() -> None:
     global model, tokenizer
     if model is not None: return
-    if HAS_GPU: get_zoo().unload_resident()
+    if HAS_GPU:
+        zoo = get_zoo()
+        zoo.unload_worker()
+        zoo.unload_resident()
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     model = AutoModelForCausalLM.from_pretrained(MODEL_ID, quantization_config=quant_config, device_map=device_map, torch_dtype=torch_dtype)
     _tier["current"] = "copilot"
@@ -127,7 +130,13 @@ class UserRequest(BaseModel):
 
 @app.get("/health")
 def health_check() -> Dict[str, Any]:
-    return {"status": "ok", "tier": _tier["current"]}
+    info: Dict[str, Any] = {"status": "ok", "tier": _tier["current"]}
+    if HAS_GPU:
+        try:
+            info.update(get_zoo().status())
+        except Exception:
+            pass
+    return info
 
 @app.post("/upload_image")
 def upload_image_endpoint(file: UploadFile = File(...)) -> Dict[str, str]:
