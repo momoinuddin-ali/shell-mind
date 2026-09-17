@@ -15,3 +15,4 @@ offload_cache/
 downloads.log
 __pycache__/
 supervisor/
+models/
