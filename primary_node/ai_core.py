@@ -3,6 +3,7 @@ ai_core.py — SHELL MIND server (final merge: product layer + engine).
 """
 
 import gc
+import uuid
 import logging
 import os
 import shutil
@@ -118,6 +119,31 @@ def _ensure_copilot() -> None:
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     model = AutoModelForCausalLM.from_pretrained(MODEL_ID, quantization_config=quant_config, device_map=device_map, torch_dtype=torch_dtype)
     _tier["current"] = "copilot"
+#IT MAKES THE FILE SAFE AND GIVE UNIQUE NAME TO EVERY FILE
+ALLOWED_EXT={".jpeg",".png",".jpg",".gif",".pdf",".txt",".csv"}
+
+MAX_UPLOAD_BYTES=25*1024*1024
+
+def _save_upload(file: UploadFile) -> str:
+   
+    if not file.filename:
+        return ""
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in ALLOWED_EXT:          # whitelist = traversal ka aadhaar hi khatam
+        return ""
+    save_path = Path(tempfile.gettempdir()) / f"{uuid.uuid4().hex}{suffix}"
+    written = 0
+    try:
+        with open(save_path, "wb") as out:
+            while chunk := file.file.read(1024 * 1024):
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    raise ValueError("too large")
+                out.write(chunk)
+    except ValueError:
+        save_path.unlink(missing_ok=True)
+        return ""
+    return str(save_path)
 
 # ==========================================
 # 5. API ENDPOINTS
@@ -140,18 +166,13 @@ def health_check() -> Dict[str, Any]:
 
 @app.post("/upload_image")
 def upload_image_endpoint(file: UploadFile = File(...)) -> Dict[str, str]:
-    if not file.filename: return {"image_path": ""}
-    temp_path = os.path.join(tempfile.gettempdir(), file.filename)
-    with open(temp_path, "wb") as buffer: shutil.copyfileobj(file.file, buffer)
-    return {"image_path": temp_path}
+      return {"image_path": _save_upload(file)}
+
 
 @app.post("/upload")
 def upload_document_endpoint(file: UploadFile = File(...)) -> Dict[str, str]:
-    if not file.filename: return {"document_path": ""}
-    temp_path = os.path.join(tempfile.gettempdir(), file.filename)
-    with open(temp_path, "wb") as buffer: shutil.copyfileobj(file.file, buffer)
-    return {"document_path": temp_path, "status": "stored_for_processing"}
-
+    path = _save_upload(file)
+    return {"document_path": path, "status": "stored_for_processing" if path else "rejected"}
 @app.post("/chat")
 def ask_ai(request: UserRequest) -> Dict[str, Any]:
     with GEN_LOCK:
