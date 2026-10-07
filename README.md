@@ -265,14 +265,13 @@ The smoke test asserts that each model can load, generate, unload, and actually 
 
 | Name                 | Role                          | Roll No. |
 |----------------------|-------------------------------|----------|
-| Mo Moinuddin Ali     | Lead / Systems & Orchestration| 63       |
+| Mo Moinuddin Ali     | Systems & Orchestration       | 63       |
 | Md Imtiyaz           | Backend & Model Zoo           | 61       |
-| Mohammad Ayaan       | Agents & Router               | 64       |
+| Mohammad Ayaan       | Frontend & CLI                | 64       |
 | Himanshu Verma       | Frontend & CLI                | 23       |
 
 **Institution:** Shri Shankaracharya Technical Campus, Bhilai  
-**Department:** Computer Science & Engineering (AI & ML)  
-**Guide:** Dr. Jaspal Bagga, HOD (AIML)  
+**Department:** Computer Science & Engineering (AI & ML)   
 **Session:** September – October 2026 (3rd Semester Mini-Project)
 
 ---
