@@ -1,321 +1,36 @@
-// const SERVER_URL = "http://localhost:8000"; 
+// Shell-Mind web client — threads, attachments, tier switching.
+//
+// Backend URL resolution (in order):
+//   1. ?server=<url> query parameter — explicit override
+//   2. same origin — when the backend itself serves this page
+//   3. probe http://localhost:8000, then http://127.0.0.1:8000 —
+//      when the page is hosted by a separate static server or opened
+//      as a local file (each candidate must actually answer /health)
+let SERVER_URL = location.protocol.startsWith("http")
+  ? location.origin : "http://localhost:8000";
 
-// let currentThread = [];      
-// let allThreads = [];         
-// let currentImagePath = null; 
-// let currentPdfPath = null;
-// let activeThreadIndex = 0; 
+async function detectServer() {
+  const override = new URLSearchParams(location.search).get("server");
+  if (override) return override;
 
+  const candidates = [];
+  if (location.protocol.startsWith("http")) candidates.push(location.origin);
+  for (const c of ["http://localhost:8000", "http://127.0.0.1:8000"]) {
+    if (!candidates.includes(c)) candidates.push(c);
+  }
+  for (const c of candidates) {
+    try {
+      if ((await fetch(`${c}/health`)).ok) return c;
+    } catch { /* try the next candidate */ }
+  }
+  return candidates[0];   // none answered — show it in the status bar
+}
 
-// function escapeHtml(s) {
-//   return String(s)
-//     .replace(/&/g, '&amp;')
-//     .replace(/</g, '&lt;')
-//     .replace(/>/g, '&gt;')
-//     .replace(/"/g, '&quot;')
-//     .replace(/'/g, '&#39;');
-// }
-// // Load history
-// const savedThreads = localStorage.getItem('shellMindThreads');
-// if (savedThreads) {
-//   allThreads = JSON.parse(savedThreads);
-// }
-
-// const messagesEl     = document.getElementById('messages');
-// const emptyStateEl   = document.getElementById('emptyState');
-// const promptInput    = document.getElementById('promptInput');
-// const sendBtn        = document.getElementById('sendBtn');
-// const statusDot      = document.getElementById('statusDot');
-// const backendBar     = document.getElementById('backendBar');
-// const threadListEl   = document.getElementById('threadList');
-// const newChatBtn     = document.getElementById('newChatBtn');
-// const clearAllBtn    = document.getElementById('clearAllBtn');
-// const clockEl        = document.getElementById('clock');
-
-// // Attachments
-// const attachBtn      = document.getElementById('attachBtn');
-// const visionInput    = document.getElementById('visionInput');
-// const imageIndicator = document.getElementById('imageIndicator');
-// const imageName      = document.getElementById('imageName');
-
-// // PDF Upload
-// const uploadZone     = document.getElementById('uploadZone');
-// const pdfInput       = document.getElementById('pdfInput');
-// const pdfIndicator   = document.getElementById('pdfIndicator');
-// const pdfName        = document.getElementById('pdfName');
-
-// function updateClock() {
-//   const now = new Date();
-//   let h = now.getHours();
-//   const m = now.getMinutes().toString().padStart(2, '0');
-//   const ampm = h >= 12 ? 'PM' : 'AM';
-//   h = h % 12 || 12;
-//   clockEl.textContent = `${h}:${m} ${ampm}`;
-// }
-// updateClock();
-// setInterval(updateClock, 1000 * 30);
-
-// async function checkBackend() {
-//   try {
-//     const res = await fetch(`${SERVER_URL}/health`, { method: 'GET' });
-//     if (res.ok) {
-//       statusDot.style.background = '#3FB950'; 
-//       statusDot.style.boxShadow = '0 0 8px #3FB950';
-//       backendBar.textContent = `Backend: Connected (${SERVER_URL}) · RTX 5050 Active`;
-//     } else {
-//       throw new Error('not ok');
-//     }
-//   } catch (e) {
-//     statusDot.style.background = '#C99B3D'; 
-//     statusDot.style.boxShadow = '0 0 8px #C99B3D';
-//     backendBar.textContent = `Backend: ${SERVER_URL} (Status unknown — awaiting first prompt)`;
-//   }
-// }
-// checkBackend();
-
-// // --- Message Rendering & <think> Parsing ---
-// function renderMessages() {
-//   messagesEl.innerHTML = '';
-//   if (currentThread.length === 0) {
-//     messagesEl.appendChild(emptyStateEl);
-//     return;
-//   }
-  
-//   currentThread.forEach(msg => {
-//     const div = document.createElement('div');
-//     div.className = `msg ${msg.role}${msg.error ? ' error' : ''}`;
-    
-//     if (msg.role === 'bot' && !msg.error) {
-//       // Parse <think> tags for the Expander
-//       const text = msg.text;
-//       const thinkMatch = text.match(/<think>([\s\S]*?)<\/think>/);
-      
-//       if (thinkMatch) {
-//         const thoughtProcess = thinkMatch[1].trim();
-//         const finalAnswer = text.replace(thinkMatch[0], '').trim();
-        
-//         div.innerHTML = `
-//           <details class="thought-process">
-//             <summary>🧠 View AI's Thought Process</summary>
-//             <div class="thought-content">${thoughtProcess}</div>
-//           </details>
-//           <div class="final-answer">${finalAnswer}</div>
-//         `;
-//       } else {
-//         div.textContent = text;
-//       }
-//     } else {
-//       div.textContent = msg.text;
-//     }
-    
-//     messagesEl.appendChild(div);
-//   });
-//   messagesEl.scrollTop = messagesEl.scrollHeight; 
-// }
-
-// // --- Neural Network Loader ---
-// function showTypingIndicator() {
-//   const div = document.createElement('div');
-//   div.className = 'neural-loader';
-//   div.id = 'typingIndicator';
-//   div.innerHTML = `
-//     <div class="nodes">
-//       <div class="node"></div><div class="link"></div>
-//       <div class="node"></div><div class="link"></div>
-//       <div class="node"></div>
-//     </div>
-//     Model is generating...
-//   `;
-//   messagesEl.appendChild(div);
-//   messagesEl.scrollTop = messagesEl.scrollHeight;
-// }
-
-// function removeTypingIndicator() {
-//   const el = document.getElementById('typingIndicator');
-//   if (el) el.remove();
-// }
-
-// async function sendMessage(text) {
-//   if (!text || !text.trim()) return;
-
-//   currentThread.push({ role: 'user', text: text });
-  
-//   if (currentThread.length === 1) {
-//     const title = text.slice(0, 22) + (text.length > 22 ? "..." : "");
-//     if (allThreads[activeThreadIndex]) {
-//         allThreads[activeThreadIndex].title = title;
-//     } else {
-//         allThreads.unshift({ title, messages: currentThread });
-//         activeThreadIndex = 0;
-//     }
-//     renderThreadList();
-//   }
-  
-//   renderMessages();
-//   promptInput.value = '';
-//   sendBtn.disabled = true;
-//   showTypingIndicator();
-
-//   try {
-//     const selectedMode = document.getElementById('modeSelect').value;
-//     const payload = { prompt: text, mode: selectedMode };
-    
-//     // Attach paths if files are present
-//     if (currentImagePath) payload.image_path = currentImagePath;
-//     if (currentPdfPath) payload.document_path = currentPdfPath; 
-
-//     const res = await fetch(`${SERVER_URL}/chat`, {
-//       method: 'POST',
-//       headers: { 'Content-Type': 'application/json' },
-//       body: JSON.stringify(payload)
-//     });
-
-//     removeTypingIndicator();
-//     if (!res.ok) throw new Error(`Server returned status ${res.status}`);
-
-//     const data = await res.json();
-//     currentThread.push({ role: 'bot', text: data.answer });
-    
-//     statusDot.style.background = '#3FB950'; 
-//     statusDot.style.boxShadow = '0 0 8px #3FB950';
-
-//     // Clear attachments after successful send
-//     currentImagePath = null;
-//     currentPdfPath = null;
-//     imageIndicator.style.display = 'none';
-//     pdfIndicator.style.display = 'none';
-//     visionInput.value = "";
-//     pdfInput.value = "";
-
-//   } catch (err) {
-//     removeTypingIndicator();
-//     currentThread.push({
-//       role: 'bot',
-//       error: true,
-//       text: `⚠ Server ${SERVER_URL} not reachable.\nDetail: ${err.message}`
-//     });
-//     statusDot.style.background = '#B84A4A'; 
-//     statusDot.style.boxShadow = '0 0 8px #B84A4A';
-//   }
-
-//   // Save to local storage
-//   if (allThreads[activeThreadIndex]) {
-//       allThreads[activeThreadIndex].messages = currentThread;
-//   }
-//   localStorage.setItem('shellMindThreads', JSON.stringify(allThreads));
-
-//   renderMessages();
-//   sendBtn.disabled = false;
-//   promptInput.focus();
-// }
-
-// sendBtn.addEventListener('click', () => sendMessage(promptInput.value));
-// promptInput.addEventListener('keydown', (e) => {
-//   if (e.key === 'Enter') sendMessage(promptInput.value);
-// });
-
-// document.querySelectorAll('.chip').forEach(chip => {
-//   chip.addEventListener('click', () => {
-//     sendMessage(chip.getAttribute('data-text'));
-//   });
-// });
-
-// // --- Sidebar Buttons ---
-// newChatBtn.addEventListener('click', () => {
-//   currentThread = [];
-//   allThreads.unshift({ title: "New Chat", messages: [] });
-//   activeThreadIndex = 0;
-//   localStorage.setItem('shellMindThreads', JSON.stringify(allThreads));
-//   renderThreadList();
-//   renderMessages();
-// });
-
-// clearAllBtn.addEventListener('click', () => {
-//   if(confirm("Are you sure you want to delete all local chat history?")) {
-//     allThreads = [];
-//     currentThread = [];
-//     localStorage.removeItem('shellMindThreads');
-//     renderThreadList();
-//     renderMessages();
-//   }
-// });
-
-// function renderThreadList() {
-//   threadListEl.innerHTML = '';
-//   allThreads.forEach((t, index) => {
-//     const div = document.createElement('div');
-//     div.className = 'thread-item';
-//     if (index === activeThreadIndex) div.classList.add('active');
-    
-//     div.textContent = `💬 ${t.title || "New Chat"}`;
-//     div.addEventListener('click', () => {
-//       activeThreadIndex = index;
-//       currentThread = t.messages;
-//       renderThreadList(); 
-//       renderMessages();
-//     });
-//     threadListEl.appendChild(div);
-//   });
-// }
-
-// // --- Attachments (Image & PDF) ---
-// attachBtn.addEventListener('click', () => visionInput.click());
-// visionInput.addEventListener('change', async () => {
-//   const file = visionInput.files[0];
-//   if (!file) return;
-//   const formData = new FormData();
-//   formData.append('file', file);
-//   try {
-//     const res = await fetch(`${SERVER_URL}/upload_image`, { method: 'POST', body: formData });
-//     if (res.ok) {
-//       const data = await res.json();
-//       currentImagePath = data.image_path;
-//       imageName.textContent = file.name;
-//       imageIndicator.style.display = 'block';
-//     } else throw new Error();
-//   } catch (err) {
-//     alert("Image upload failed. Ensure FastAPI backend is running.");
-//   }
-// });
-
-// uploadZone.addEventListener('click', () => pdfInput.click());
-// pdfInput.addEventListener('change', async () => {
-//   const file = pdfInput.files[0];
-//   if (!file) return;
-  
-//   const formData = new FormData();
-//   formData.append('file', file);
-  
-//   pdfName.textContent = file.name + " (Uploading...)";
-//   pdfIndicator.style.display = 'block';
-  
-//   try {
-//     const res = await fetch(`${SERVER_URL}/upload`, { method: 'POST', body: formData });
-//     if (res.ok) {
-//         const data = await res.json();
-//         currentPdfPath = data.document_path; 
-//         pdfName.textContent = file.name + " (Ready for processing)";
-//     } else {
-//         throw new Error();
-//     }
-//   } catch (err) {
-//     alert("PDF upload failed. Ensure backend is running.");
-//     pdfIndicator.style.display = 'none';
-//   }
-// });
-
-// renderThreadList();
-// renderMessages();
-
-
-const SERVER_URL = "http://localhost:8000";
-
-let currentThread = [];      
-let allThreads = [];         
-let currentImagePath = null; 
+let currentThread = [];
+let allThreads = [];
+let currentImagePath = null;
 let currentPdfPath = null;
-let activeThreadIndex = 0; 
-
+let activeThreadIndex = 0;
 
 function escapeHtml(s) {
   return String(s)
@@ -326,10 +41,14 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
-// Load history
-const savedThreads = localStorage.getItem('shellMindThreads');
-if (savedThreads) {
-  allThreads = JSON.parse(savedThreads);
+// Load history; corrupted storage resets instead of bricking the UI.
+try {
+  const savedThreads = localStorage.getItem('shellMindThreads');
+  if (savedThreads) allThreads = JSON.parse(savedThreads);
+  if (!Array.isArray(allThreads)) allThreads = [];
+} catch (err) {
+  console.warn('Corrupted local thread history — starting fresh:', err);
+  allThreads = [];
 }
 
 const messagesEl     = document.getElementById('messages');
@@ -349,7 +68,7 @@ const visionInput    = document.getElementById('visionInput');
 const imageIndicator = document.getElementById('imageIndicator');
 const imageName      = document.getElementById('imageName');
 
-// PDF Upload
+// PDF / document upload
 const uploadZone     = document.getElementById('uploadZone');
 const pdfInput       = document.getElementById('pdfInput');
 const pdfIndicator   = document.getElementById('pdfIndicator');
@@ -370,19 +89,25 @@ async function checkBackend() {
   try {
     const res = await fetch(`${SERVER_URL}/health`, { method: 'GET' });
     if (res.ok) {
-      statusDot.style.background = '#3FB950'; 
+      const info = await res.json();
+      const vram = info.free_vram_gb != null ? ` · ${info.free_vram_gb} GB VRAM free` : '';
+      statusDot.style.background = '#3FB950';
       statusDot.style.boxShadow = '0 0 8px #3FB950';
-      backendBar.textContent = `Backend: Connected (${SERVER_URL}) · RTX 5050 Active`;
+      backendBar.textContent = `Backend: Connected (${SERVER_URL}) · ${info.tier ?? '?'} tier${vram}`;
     } else {
       throw new Error('not ok');
     }
   } catch (e) {
-    statusDot.style.background = '#C99B3D'; 
+    statusDot.style.background = '#C99B4D';
     statusDot.style.boxShadow = '0 0 8px #C99B3D';
     backendBar.textContent = `Backend: ${SERVER_URL} (Status unknown — awaiting first prompt)`;
   }
 }
-checkBackend();
+backendBar.textContent = `Backend: searching...`;
+detectServer().then(url => {
+  if (url !== SERVER_URL) SERVER_URL = url;
+  checkBackend();
+});
 
 // --- Message Rendering & <think> Parsing ---
 function renderMessages() {
@@ -391,26 +116,26 @@ function renderMessages() {
     messagesEl.appendChild(emptyStateEl);
     return;
   }
-  
+
   currentThread.forEach(msg => {
     const div = document.createElement('div');
     div.className = `msg ${msg.role}${msg.error ? ' error' : ''}`;
-    
+
     if (msg.role === 'bot' && !msg.error) {
       // Parse <think> tags for the Expander
       const text = msg.text;
       const thinkMatch = text.match(/<think>([\s\S]*?)<\/think>/);
-      
+
       if (thinkMatch) {
         const thoughtProcess = thinkMatch[1].trim();
         const finalAnswer = text.replace(thinkMatch[0], '').trim();
-        
+
         div.innerHTML = `
           <details class="thought-process">
             <summary>🧠 View AI's Thought Process</summary>
-            <div class="thought-content">${escapeHtml(thoughtProcess)}</div>  <!-- F1 FIX -->
+            <div class="thought-content">${escapeHtml(thoughtProcess)}</div>
           </details>
-          <div class="final-answer">${escapeHtml(finalAnswer)}</div>          <!-- F1 FIX -->
+          <div class="final-answer">${escapeHtml(finalAnswer)}</div>
         `;
       } else {
         div.textContent = text;
@@ -418,10 +143,10 @@ function renderMessages() {
     } else {
       div.textContent = msg.text;
     }
-    
+
     messagesEl.appendChild(div);
   });
-  messagesEl.scrollTop = messagesEl.scrollHeight; 
+  messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 // --- Neural Network Loader ---
@@ -448,11 +173,12 @@ function removeTypingIndicator() {
 
 async function sendMessage(text) {
   if (!text || !text.trim()) return;
-  if (sendBtn.disabled) return;   // F2 FIX: blocks double-send with Enter key
+  if (sendBtn.disabled) return;   // blocks double-send with Enter key
 
-  // ── F2 FIX: capture thread BEFORE any await ──
-  const thread = currentThread;                 // array this request belongs to
-  let entry = allThreads[activeThreadIndex];    // thread entry this request belongs to
+  // Capture the thread BEFORE any await so replies land in the right
+  // conversation even if the user switches threads mid-request.
+  const thread = currentThread;
+  let entry = allThreads[activeThreadIndex];
 
   if (!entry) {
     entry = { title: "New Chat", messages: thread };
@@ -461,13 +187,13 @@ async function sendMessage(text) {
   }
 
   thread.push({ role: 'user', text: text });
-  
+
   if (thread.length === 1) {
     const title = text.slice(0, 22) + (text.length > 22 ? "..." : "");
     entry.title = title;
     renderThreadList();
   }
-  
+
   renderMessages();
   promptInput.value = '';
   sendBtn.disabled = true;
@@ -476,10 +202,10 @@ async function sendMessage(text) {
   try {
     const selectedMode = document.getElementById('modeSelect').value;
     const payload = { prompt: text, mode: selectedMode };
-    
-    // Attach paths if files are present
+
+    // Attach server-issued paths (returned by /upload endpoints)
     if (currentImagePath) payload.image_path = currentImagePath;
-    if (currentPdfPath) payload.document_path = currentPdfPath; 
+    if (currentPdfPath) payload.document_path = currentPdfPath;
 
     const res = await fetch(`${SERVER_URL}/chat`, {
       method: 'POST',
@@ -488,12 +214,15 @@ async function sendMessage(text) {
     });
 
     removeTypingIndicator();
-    if (!res.ok) throw new Error(`Server returned status ${res.status}`);
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Server returned status ${res.status}`);
+    }
 
     const data = await res.json();
-    thread.push({ role: 'bot', text: data.answer });   // F2 FIX: use captured thread
-    
-    statusDot.style.background = '#3FB950'; 
+    thread.push({ role: 'bot', text: data.answer });
+
+    statusDot.style.background = '#3FB950';
     statusDot.style.boxShadow = '0 0 8px #3FB950';
 
     // Clear attachments after successful send
@@ -506,17 +235,17 @@ async function sendMessage(text) {
 
   } catch (err) {
     removeTypingIndicator();
-    thread.push({                                      // F2 FIX: use captured thread
+    thread.push({
       role: 'bot',
       error: true,
       text: `⚠ Server ${SERVER_URL} not reachable.\nDetail: ${err.message}`
     });
-    statusDot.style.background = '#B84A4A'; 
+    statusDot.style.background = '#B84A4A';
     statusDot.style.boxShadow = '0 0 8px #B84A4A';
   }
 
   // Save to local storage
-  entry.messages = thread;                             // F2 FIX: use captured entry
+  entry.messages = thread;
   localStorage.setItem('shellMindThreads', JSON.stringify(allThreads));
 
   renderMessages();
@@ -561,19 +290,21 @@ function renderThreadList() {
     const div = document.createElement('div');
     div.className = 'thread-item';
     if (index === activeThreadIndex) div.classList.add('active');
-    
+
     div.textContent = `💬 ${t.title || "New Chat"}`;
     div.addEventListener('click', () => {
       activeThreadIndex = index;
       currentThread = t.messages;
-      renderThreadList(); 
+      renderThreadList();
       renderMessages();
     });
     threadListEl.appendChild(div);
   });
 }
 
-// --- Attachments (Image & PDF) ---
+// --- Attachments (Image & Document) ---
+// Server-side paths are opaque tokens to this client: upload first, then
+// send the returned path back with the next /chat request.
 attachBtn.addEventListener('click', () => visionInput.click());
 visionInput.addEventListener('change', async () => {
   const file = visionInput.files[0];
@@ -587,9 +318,12 @@ visionInput.addEventListener('change', async () => {
       currentImagePath = data.image_path;
       imageName.textContent = file.name;
       imageIndicator.style.display = 'block';
-    } else throw new Error();
+    } else {
+      const detail = await res.json().catch(() => ({}));
+      alert(`Image upload rejected: ${detail.detail || `HTTP ${res.status}`}`);
+    }
   } catch (err) {
-    alert("Image upload failed. Ensure FastAPI backend is running.");
+    alert(`Image upload failed — is the backend running at ${SERVER_URL}?`);
   }
 });
 
@@ -597,24 +331,26 @@ uploadZone.addEventListener('click', () => pdfInput.click());
 pdfInput.addEventListener('change', async () => {
   const file = pdfInput.files[0];
   if (!file) return;
-  
+
   const formData = new FormData();
   formData.append('file', file);
-  
+
   pdfName.textContent = file.name + " (Uploading...)";
   pdfIndicator.style.display = 'block';
-  
+
   try {
     const res = await fetch(`${SERVER_URL}/upload`, { method: 'POST', body: formData });
     if (res.ok) {
         const data = await res.json();
-        currentPdfPath = data.document_path; 
+        currentPdfPath = data.document_path;
         pdfName.textContent = file.name + " (Ready for processing)";
     } else {
-        throw new Error();
+        const detail = await res.json().catch(() => ({}));
+        alert(`Document upload rejected: ${detail.detail || `HTTP ${res.status}`}`);
+        pdfIndicator.style.display = 'none';
     }
   } catch (err) {
-    alert("PDF upload failed. Ensure backend is running.");
+    alert(`Document upload failed — is the backend running at ${SERVER_URL}?`);
     pdfIndicator.style.display = 'none';
   }
 });

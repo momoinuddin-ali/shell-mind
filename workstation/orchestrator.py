@@ -2,11 +2,13 @@
 orchestrator.py — the state machine:
     router -> (vision -> context) -> ONE worker (coder|thinker) -> critic
 
-Fixes vs. first draft:
+Contract:
   * Vision output is CONTEXT, not the final draft — "screenshot of an
-    error" + "fix this" now wakes vision AND the coder.
-  * Guards for not-yet-downloaded models: the pipeline degrades
-    gracefully instead of downloading 16 GB inside an HTTP request.
+    error" + "fix this" wakes vision AND the coder.
+  * Missing models degrade gracefully instead of downloading tens of GB
+    inside an HTTP request. A vision-only request without the vision
+    model refuses honestly instead of letting the critic invent an
+    answer about an image it never saw.
   * Stage timings + VRAM timeline recorded for the portfolio chart.
 """
 
@@ -33,10 +35,27 @@ def run_agentic_pipeline(prompt: str, image_path: str | None = None) -> dict:
     task = plan["task_type"]
     log.info("Router Plan: %s", plan)
 
+    # A vision-only plan is meaningless without an image; downgrade to chat.
+    if task == "vision_only" and not image_path:
+        task = "chat"
+
     # 2) vision (optional) -> compact text CONTEXT for the worker
+    vision_ready = image_path is not None and zoo.has_model("vision")
+    if task == "vision_only" and not vision_ready:
+        return {
+            "answer": ("⚠️ This request needs the vision specialist, but "
+                       "Qwen3-VL-8B is not in the local model cache yet "
+                       "(see README → Model Registry for the one-time "
+                       "download). Please re-send it once the model is "
+                       "available."),
+            "task": "vision_only",
+            "stages": [("router", round(stages[0][1], 2))],
+            "total_s": round(time.perf_counter() - t0, 1),
+        }
+
     context = ""
     if plan["needs_vision"] and image_path:
-        if zoo.has_model("vision"):
+        if vision_ready:
             t = time.perf_counter()
             context = agents.see(image_path, prompt)
             stages.append(("vision", time.perf_counter() - t))
@@ -67,7 +86,7 @@ def run_agentic_pipeline(prompt: str, image_path: str | None = None) -> dict:
                             draft or "(no draft — answer directly)")
     stages.append(("critic", time.perf_counter() - t))
 
-    zoo.dump_timeline("vram_timeline.json")
+    zoo.dump_timeline()
     log.info("=== Pipeline complete in %.1fs ===", time.perf_counter() - t0)
     return {
         "answer": final,

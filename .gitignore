@@ -1,18 +1,18 @@
-hf_cache/
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
 venv_linux/
-supervisor/logs.db
-supervisor/thinking.log
-__pycache__/
-primary_node/__pycache__/
-downloads.log
-vram_timeline.json
-__pycache__/
-shell_mind_history.db
-*.dbshell_mind_history.db
-vram_timeline.json
+
+# Runtime artifacts (weights, scratch, logs)
+models/
 uploads/
 offload_cache/
 downloads.log
-__pycache__/
 supervisor/
-models/
+
+# Local databases & generated artifacts
+shell_mind_history.db
+*.db
+vram_timeline.json

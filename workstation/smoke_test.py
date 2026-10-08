@@ -141,7 +141,7 @@ def main() -> None:
             log.info("--- coexistence skipped for '%s': heavy workers park "
                      "the router in production (by design) ---", coex_key)
 
-    zoo.dump_timeline("vram_timeline.json")
+    zoo.dump_timeline()
 
     print("\n================ SMOKE TEST SUMMARY ================")
     for r in results:

@@ -1,14 +1,14 @@
 """
-shell_mind_cli.py — terminal client for the SHELL MIND server.
+cli.py — terminal client for the Shell-Mind server.
 
-The CLI never loads models — it's the thin client of the 3-tier
-architecture and runs on any machine.
+The CLI never loads models — it is the thin client of the 3-tier
+architecture and runs on any machine with network access to the server.
 
 Usage:
-  python shell_mind_cli.py                                    # interactive chat
-  python shell_mind_cli.py explain "ls -la"                   # one-shot (GPU Copilot)
-  python shell_mind_cli.py --mode agent "fix this: ValueError: invalid literal for int()"
-  python shell_mind_cli.py --mode agent --image shot.png "what is wrong in this screenshot?"
+  python cli.py                                             # interactive chat
+  python cli.py "explain this traceback: ValueError: ..."   # one-shot (GPU copilot)
+  python cli.py --mode agent "fix this: ValueError: invalid literal for int()"
+  python cli.py --mode agent --image shot.png "what is wrong in this screenshot?"
 
 Interactive commands: /mode, /image, /help, exit, quit, clear
 """
@@ -27,32 +27,34 @@ TIMEOUTS = {"agent": 600, "gpu": 180, "cpu": 180}
 
 def get_server_choice():
     print("\n=== Shell-Mind ===")
-    print("1) Use Moin's Omen as Remote Server (Long Distance - Fast, 8B)")
-    print("2) Use Local Small Model (True Offline - Works on No dGPU)")
+    print("1) Remote server (e.g. a GPU machine over Tailscale)")
+    print("2) Local server on this machine (http://localhost:8000)")
     choice = input("Choose [1/2]: ").strip()
 
     if choice == "1":
         default_remote = os.getenv("SHELL_MIND_SERVER", "")
-        print("\nEnter Moin's Tailscale IP (e.g. 100.109.148.4)")
+        print("\nEnter the server address (e.g. 100.109.148.4)")
         if default_remote:
             print(f"Press Enter to use saved: {default_remote}")
 
-        # Get input and clean up accidental spaces or % signs
+        # Clean up accidental spaces or % signs
         raw_ip = input("Remote URL: ").strip().replace("%", "").replace(" ", "") or default_remote
 
-        # Strip protocol first so we don't accidentally split the 'http://'
+        # Strip the protocol first so we don't accidentally split the 'http://'
         if raw_ip.startswith("http://"):
             raw_ip = raw_ip[7:]
         elif raw_ip.startswith("https://"):
             raw_ip = raw_ip[8:]
 
-        # Now safely remove any typed ports and slashes
+        # Now safely drop any typed ports and slashes
         raw_ip = raw_ip.split(":")[0].rstrip("/")
 
         return f"http://{raw_ip}:8000"
-    else:
-        print("\nStarting local CPU model...")
-        return DEFAULT_LOCAL
+
+    print("\nNote: option 2 connects to a server running on THIS machine.")
+    print("If it is not running yet, start it in another terminal:")
+    print("   uvicorn primary_node.ai_core:app --host 0.0.0.0 --port 8000")
+    return DEFAULT_LOCAL
 
 
 def ping(server_url: str) -> None:
@@ -61,11 +63,37 @@ def ping(server_url: str) -> None:
         info = requests.get(f"{server_url}/health", timeout=5).json()
         vram = info.get("free_vram_gb")
         vram_s = f" | {vram} GB VRAM free" if vram is not None else ""
-        print(f"✅ Server online: {info.get('default_model', '?')} "
-              f"[{info.get('tier', '?')} tier{vram_s}]")
+        print(f"✅ Server online [{info.get('tier', '?')} tier{vram_s}]")
     except Exception:
         print("⚠️  Server not responding yet — start it in another terminal with:")
         print("   uvicorn primary_node.ai_core:app --host 0.0.0.0 --port 8000")
+
+
+def upload_image(server_url: str, image_path: Path) -> str | None:
+    """Upload a local image to the server and return the server-side path.
+
+    The server never opens client-local paths, so the image must be
+    transferred first — this is what makes `--image` work from a
+    different machine than the server.
+    """
+    try:
+        with open(image_path, "rb") as fh:
+            r = requests.post(f"{server_url}/upload_image",
+                              files={"file": (image_path.name, fh)},
+                              timeout=300)
+        if r.status_code == 200:
+            server_path = r.json().get("image_path")
+            if server_path:
+                return server_path
+            print("[Error] Server accepted the upload but returned no path.\n")
+        else:
+            print(f"[Error] Upload rejected (HTTP {r.status_code}): "
+                  f"{r.text[:200]}\n")
+    except requests.RequestException as exc:
+        print(f"[Error] Image upload failed: {exc}\n")
+    except OSError as exc:
+        print(f"[Error] Cannot read '{image_path}': {exc}\n")
+    return None
 
 
 def print_reply(reply: dict) -> None:
@@ -78,10 +106,14 @@ def print_reply(reply: dict) -> None:
 
 def chat_with_server(server_url: str, prompt_text: str,
                      mode: str = "gpu", image_path: Path | None = None) -> None:
+    payload = {"prompt": prompt_text, "mode": mode}
+    if image_path:
+        server_path = upload_image(server_url, image_path)
+        if not server_path:
+            print("[Error] Prompt not sent — the image could not be uploaded.\n")
+            return
+        payload["image_path"] = server_path
     try:
-        payload = {"prompt": prompt_text, "mode": mode}
-        if image_path:
-            payload["image_path"] = str(image_path)
         r = requests.post(f"{server_url}/chat", json=payload,
                           timeout=TIMEOUTS.get(mode, 180))
         if r.status_code == 200:
@@ -91,7 +123,7 @@ def chat_with_server(server_url: str, prompt_text: str,
     except requests.Timeout:
         print(f"[Error] Timed out after {TIMEOUTS.get(mode, 180)}s in {mode} mode "
               f"(model may still be working — check the server terminal).\n")
-    except Exception:
+    except requests.RequestException:
         print(f"[Error] Server not reachable at {server_url}.")
         print("-> Did you forget to start 'uvicorn primary_node.ai_core:app' in another terminal?\n")
 
@@ -103,7 +135,7 @@ def main() -> None:
     ap.add_argument("--mode", choices=["agent", "gpu", "cpu"], default="gpu",
                     help="compute tier (default: gpu copilot)")
     ap.add_argument("--image", type=Path, default=None,
-                    help="image/screenshot path — used by the agent vision expert")
+                    help="image/screenshot path — uploaded to the server and routed to the agent vision expert")
     args = ap.parse_args()
 
     server_url = get_server_choice()
@@ -113,6 +145,9 @@ def main() -> None:
 
     mode = args.mode
     image = args.image
+    if image and not image.exists():
+        print(f"[Error] Image not found: {image}\n")
+        sys.exit(1)
 
     # --- ONE-SHOT COMMAND MODE ---
     if args.prompt:
@@ -151,7 +186,7 @@ def main() -> None:
                     img = Path(parts[1].strip().strip("'\""))
                     if img.exists():
                         image = img
-                        print(f"   [image attached: {img} — sent with your next message]\n")
+                        print(f"   [image attached: {img} — uploaded with your next message]\n")
                     else:
                         print(f"   [image not found: {img}]\n")
                 else:
@@ -161,7 +196,7 @@ def main() -> None:
 
             if low == "/help":
                 print("   /mode agent|gpu|cpu   switch compute tier")
-                print("   /image <path>|none    attach a screenshot (agent mode)")
+                print("   /image <path>|none    attach a screenshot (uploaded with the next message)")
                 print("   exit | quit | clear\n")
                 continue
 

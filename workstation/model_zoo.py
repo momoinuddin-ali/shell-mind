@@ -30,8 +30,10 @@ os.environ.setdefault("__NV_PRIME_RENDER_OFFLOAD", "1")
 os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-_WS_ROOT = Path(__file__).resolve().parents[2]
-os.environ.setdefault("HF_HOME", str(_WS_ROOT / "models" / "hf_cache"))
+from . import paths
+
+os.environ.setdefault("HF_HOME", str(paths.HF_HOME))
+os.environ.setdefault("HF_HUB_CACHE", str(paths.HF_HUB_CACHE))
 
 import torch  # noqa: E402
 from transformers import (  # noqa: E402
@@ -101,7 +103,14 @@ class ModelZoo:
             "event": event,
             "free_gb": round(self.free_vram_gb(), 2),
             "torch_reserved_gb": round(torch.cuda.memory_reserved() / 1024**3, 2),
+            "total_gb": round(torch.cuda.get_device_properties(0).total_memory / 1024**3, 2),
         })
+
+    def note(self, event: str) -> None:
+        """Record an external VRAM-relevant event (e.g. a copilot tier
+        swap handled in ai_core) on the timeline without touching model
+        state — keeps the chart a complete picture of GPU ownership."""
+        self._probe(event)
 
     def _gpu_budget_gb(self) -> float:
         return max(self.free_vram_gb() - self.kv_headroom_gb, 2.0)
@@ -170,8 +179,8 @@ class ModelZoo:
         cls = AutoModelForImageTextToText if spec.vision else AutoModelForCausalLM
         
         # Ensure offload directory exists for disk spilling
-        offload_dir = _WS_ROOT / "offload_cache"
-        offload_dir.mkdir(exist_ok=True)
+        offload_dir = paths.OFFLOAD_DIR
+        offload_dir.mkdir(parents=True, exist_ok=True)
 
         model = cls.from_pretrained(
             spec.hf_id,
@@ -243,7 +252,9 @@ class ModelZoo:
         snaps = hub / f"models--{spec.hf_id.replace('/', '--')}" / "snapshots"
         return bool(any(snaps.glob("*/*.safetensors")))
     
-    def dump_timeline(self, path: str | Path = "vram_timeline.json") -> None:
+    def dump_timeline(self, path: str | Path | None = None) -> None:
+        if path is None:
+            path = paths.TIMELINE_PATH
         Path(path).write_text(json.dumps(self.timeline, indent=2))
         log.info("VRAM timeline -> %s (%d samples)", path, len(self.timeline))
 

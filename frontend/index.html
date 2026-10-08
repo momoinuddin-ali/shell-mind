@@ -24,11 +24,11 @@
       <div class="threads" id="threadList"></div>
       
       <div class="divider"></div>
-      <div class="section-label">📁 DOCUMENT RAG (200MB LIMIT)</div>
-      <div class="upload-zone" id="uploadZone" title="Click to upload PDFs">
+      <div class="section-label">📁 DOCUMENT CONTEXT (≤ 25 MB)</div>
+      <div class="upload-zone" id="uploadZone" title="Upload PDF / TXT / CSV">
         <div class="upload-icon">📄</div>
-        <div class="upload-text">Upload PDF Context</div>
-        <input type="file" id="pdfInput" accept="application/pdf" style="display:none;">
+        <div class="upload-text">Upload PDF / TXT / CSV</div>
+        <input type="file" id="pdfInput" accept=".pdf,.txt,.csv" style="display:none;">
       </div>
 
       <div class="divider"></div>
@@ -69,7 +69,7 @@
         <div class="input-row">
           <div class="input-box">
             <button class="attach-btn" id="attachBtn" title="Attach Image">📎</button>
-            <input type="file" id="visionInput" accept="image/png, image/jpeg" style="display:none;">
+            <input type="file" id="visionInput" accept="image/png, image/jpeg, image/gif" style="display:none;">
             
             <input type="text" id="promptInput" placeholder="Ask your local model anything...">
             <button class="send-btn" id="sendBtn">➤</button>
