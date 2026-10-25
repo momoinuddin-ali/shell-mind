@@ -10,7 +10,7 @@ Usage:
   python cli.py --mode agent "fix this: ValueError: invalid literal for int()"
   python cli.py --mode agent --image shot.png "what is wrong in this screenshot?"
 
-Interactive commands: /mode, /image, /help, exit, quit, clear
+Interactive commands: /mode, /image, /doc, /help, exit, quit, clear
 """
 
 import argparse
@@ -20,41 +20,87 @@ from pathlib import Path
 
 import requests
 
+
+def _load_env() -> None:
+    """Tiny .env loader: KEY=VALUE lines, '#' comments. No dependency.
+
+    Lets `setup.sh`-generated configuration (server address, API key)
+    work with zero extra steps — real environment variables still win.
+    """
+    env_file = Path(__file__).resolve().parent / ".env"
+    if not env_file.exists():
+        return
+    try:
+        lines = env_file.read_text().splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, _, v = line.partition("=")
+            os.environ.setdefault(k.strip(), v.strip())
+
+
+_load_env()
+
+
+def _ui(s: str) -> str:
+    """ASCII-safe glyphs on legacy Windows consoles (L11)."""
+    if sys.platform != "win32":
+        return s
+    return (
+        s.replace("✅", "[OK]")
+         .replace("⚠️", "[!]")
+         .replace("⏱", "[TIME]")
+         .replace("⚡", "*")
+    )
+
+
 DEFAULT_LOCAL = "http://localhost:8000"
 # Agent pipelines load several models sequentially -> minutes, not seconds.
 TIMEOUTS = {"agent": 600, "gpu": 180, "cpu": 180}
 
 
-def get_server_choice():
+def _auth_headers(api_key: str | None) -> dict:
+    return {"X-API-Key": api_key} if api_key else {}
+
+
+def _normalize_server_url(raw: str) -> str:
+    """Accept host, host:port, or full URL; preserve scheme; default port 8000."""
+    from urllib.parse import urlparse
+    raw = (raw or "").strip().replace("%", "").replace(" ", "")
+    if not raw:
+        return DEFAULT_LOCAL
+    if "://" not in raw:
+        raw = "http://" + raw
+    parsed = urlparse(raw)
+    scheme = parsed.scheme or "http"
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 8000
+    return f"{scheme}://{host}:{port}"
+
+
+def get_server_choice(explicit: str | None = None):
+    if explicit:
+        return _normalize_server_url(explicit)
+    env = os.getenv("SHELL_MIND_SERVER", "")
     print("\n=== Shell-Mind ===")
     print("1) Remote server (e.g. a GPU machine over Tailscale)")
     print("2) Local server on this machine (http://localhost:8000)")
     choice = input("Choose [1/2]: ").strip()
 
     if choice == "1":
-        default_remote = os.getenv("SHELL_MIND_SERVER", "")
-        print("\nEnter the server address (e.g. 100.109.148.4)")
-        if default_remote:
-            print(f"Press Enter to use saved: {default_remote}")
-
-        # Clean up accidental spaces or % signs
-        raw_ip = input("Remote URL: ").strip().replace("%", "").replace(" ", "") or default_remote
-
-        # Strip the protocol first so we don't accidentally split the 'http://'
-        if raw_ip.startswith("http://"):
-            raw_ip = raw_ip[7:]
-        elif raw_ip.startswith("https://"):
-            raw_ip = raw_ip[8:]
-
-        # Now safely drop any typed ports and slashes
-        raw_ip = raw_ip.split(":")[0].rstrip("/")
-
-        return f"http://{raw_ip}:8000"
+        print("\nEnter the server address (host, host:port, or full URL)")
+        if env:
+            print(f"Press Enter to use saved: {env}")
+        raw = input("Remote URL: ").strip() or env
+        return _normalize_server_url(raw)
 
     print("\nNote: option 2 connects to a server running on THIS machine.")
     print("If it is not running yet, start it in another terminal:")
     print("   uvicorn primary_node.ai_core:app --host 0.0.0.0 --port 8000")
     return DEFAULT_LOCAL
+
 
 
 def ping(server_url: str) -> None:
@@ -63,13 +109,14 @@ def ping(server_url: str) -> None:
         info = requests.get(f"{server_url}/health", timeout=5).json()
         vram = info.get("free_vram_gb")
         vram_s = f" | {vram} GB VRAM free" if vram is not None else ""
-        print(f"✅ Server online [{info.get('tier', '?')} tier{vram_s}]")
+        print(_ui(f"✅ Server online [{info.get('tier', '?')} tier{vram_s}]"))
     except Exception:
-        print("⚠️  Server not responding yet — start it in another terminal with:")
+        print(_ui("⚠️  Server not responding yet — start it in another terminal with:"))
         print("   uvicorn primary_node.ai_core:app --host 0.0.0.0 --port 8000")
 
 
-def upload_image(server_url: str, image_path: Path) -> str | None:
+def upload_image(server_url: str, image_path: Path,
+                 api_key: str | None = None) -> str | None:
     """Upload a local image to the server and return the server-side path.
 
     The server never opens client-local paths, so the image must be
@@ -80,7 +127,12 @@ def upload_image(server_url: str, image_path: Path) -> str | None:
         with open(image_path, "rb") as fh:
             r = requests.post(f"{server_url}/upload_image",
                               files={"file": (image_path.name, fh)},
+                              headers=_auth_headers(api_key),
                               timeout=300)
+        if r.status_code == 401:
+            print("[Error] Server rejected the API key (401). Get the correct "
+                  "key from the server owner and pass it with --key.\n")
+            return None
         if r.status_code == 200:
             server_path = r.json().get("image_path")
             if server_path:
@@ -96,28 +148,69 @@ def upload_image(server_url: str, image_path: Path) -> str | None:
     return None
 
 
+def upload_document(server_url: str, doc_path: Path,
+                    api_key: str | None = None) -> str | None:
+    """Upload a local PDF/TXT/CSV for RAG-Lite; return server-side path."""
+    try:
+        with open(doc_path, "rb") as fh:
+            r = requests.post(
+                f"{server_url}/upload",
+                files={"file": (doc_path.name, fh)},
+                headers=_auth_headers(api_key),
+                timeout=300,
+            )
+        if r.status_code == 401:
+            print("[Error] Server rejected the API key (401).\n")
+            return None
+        if r.status_code == 200:
+            server_path = r.json().get("document_path")
+            if server_path:
+                return server_path
+            print("[Error] Server accepted the upload but returned no path.\n")
+        else:
+            print(f"[Error] Upload rejected (HTTP {r.status_code}): "
+                  f"{r.text[:200]}\n")
+    except requests.RequestException as exc:
+        print(f"[Error] Document upload failed: {exc}\n")
+    except OSError as exc:
+        print(f"[Error] Cannot read '{doc_path}': {exc}\n")
+    return None
+
+
 def print_reply(reply: dict) -> None:
-    print(f"ai> {reply.get('answer', '')}\n")
+    print(_ui(f"ai> {reply.get('answer', '')}\n"))
     stages = reply.get("stages")
     if stages:
         stage_s = " · ".join(f"{name} {t}s" for name, t in stages)
-        print(f"   ⏱ {stage_s} | total {reply.get('total_s', '?')}s\n")
+        print(_ui(f"   ⏱ {stage_s} | total {reply.get('total_s', '?')}s\n"))
 
 
-def chat_with_server(server_url: str, prompt_text: str,
-                     mode: str = "gpu", image_path: Path | None = None) -> None:
+def chat_with_server(server_url: str, prompt_text: str, mode: str = "gpu",
+                     image_path: Path | None = None,
+                     document_path: Path | None = None,
+                     api_key: str | None = None) -> None:
     payload = {"prompt": prompt_text, "mode": mode}
     if image_path:
-        server_path = upload_image(server_url, image_path)
+        server_path = upload_image(server_url, image_path, api_key)
         if not server_path:
             print("[Error] Prompt not sent — the image could not be uploaded.\n")
             return
         payload["image_path"] = server_path
+    if document_path:
+        server_doc = upload_document(server_url, document_path, api_key)
+        if not server_doc:
+            print("[Error] Prompt not sent — the document could not be uploaded.\n")
+            return
+        payload["document_path"] = server_doc
     try:
         r = requests.post(f"{server_url}/chat", json=payload,
+                          headers=_auth_headers(api_key),
                           timeout=TIMEOUTS.get(mode, 180))
         if r.status_code == 200:
             print_reply(r.json())
+        elif r.status_code == 401:
+            print("[Error] Server rejected the API key (401). Get the correct "
+                  "key from the server owner and pass it with --key.\n")
         else:
             print(f"[Error] Server returned status {r.status_code}: {r.text[:200]}\n")
     except requests.Timeout:
@@ -135,32 +228,51 @@ def main() -> None:
     ap.add_argument("--mode", choices=["agent", "gpu", "cpu"], default="gpu",
                     help="compute tier (default: gpu copilot)")
     ap.add_argument("--image", type=Path, default=None,
-                    help="image/screenshot path — uploaded to the server and routed to the agent vision expert")
+                    help="image/screenshot — uploaded then cleared after one shot")
+    ap.add_argument("--doc", type=Path, default=None,
+                    help="PDF/TXT/CSV for RAG-Lite — uploaded for this request")
+    ap.add_argument("--server", "-s", default=os.getenv("SHELL_MIND_SERVER"),
+                    help="server URL (skips interactive chooser); env SHELL_MIND_SERVER")
+    ap.add_argument("--key", default=os.getenv("SHELL_MIND_API_KEY"),
+                    help="API key (defaults to SHELL_MIND_API_KEY)")
     args = ap.parse_args()
 
-    server_url = get_server_choice()
+    # L12: non-interactive (piped / CI) or explicit --server / env → no prompt
+    if args.server:
+        server_url = get_server_choice(args.server)
+    elif not sys.stdin.isatty():
+        server_url = _normalize_server_url(
+            os.getenv("SHELL_MIND_SERVER") or DEFAULT_LOCAL
+        )
+    else:
+        server_url = get_server_choice(None)
     print(f"\nConnected to: {server_url}")
     ping(server_url)
     print()
 
     mode = args.mode
     image = args.image
+    document = args.doc
+    api_key = args.key
     if image and not image.exists():
         print(f"[Error] Image not found: {image}\n")
+        sys.exit(1)
+    if document and not document.exists():
+        print(f"[Error] Document not found: {document}\n")
         sys.exit(1)
 
     # --- ONE-SHOT COMMAND MODE ---
     if args.prompt:
         prompt_text = " ".join(args.prompt)
-        print(f"you> {prompt_text}")
-        chat_with_server(server_url, prompt_text, mode, image)
+        print(_ui(f"you> {prompt_text}"))
+        chat_with_server(server_url, prompt_text, mode, image, document, api_key)
         return
 
     # --- INTERACTIVE CHAT LOOP ---
-    print("Interactive mode. Commands: /mode /image /help, exit, quit, clear\n")
+    print("Interactive mode. Commands: /mode /image /doc /help, exit, quit, clear\n")
     while True:
         try:
-            prompt = input("you> ").strip()
+            prompt = input(_ui("you> ")).strip()
             if not prompt:
                 continue
             low = prompt.lower()
@@ -194,17 +306,36 @@ def main() -> None:
                     print("   [image cleared]\n")
                 continue
 
+            if low.startswith("/doc"):
+                parts = prompt.split(maxsplit=1)
+                if len(parts) > 1 and parts[1].lower() not in ("none", "clear"):
+                    d = Path(parts[1].strip().strip("'\""))
+                    if d.exists():
+                        document = d
+                        print(f"   [document attached: {d} — uploaded with your next message]\n")
+                    else:
+                        print(f"   [document not found: {d}]\n")
+                else:
+                    document = None
+                    print("   [document cleared]\n")
+                continue
+
             if low == "/help":
                 print("   /mode agent|gpu|cpu   switch compute tier")
-                print("   /image <path>|none    attach a screenshot (uploaded with the next message)")
+                print("   /image <path>|none    attach a screenshot (one message only)")
+                print("   /doc <path>|none      attach PDF/TXT/CSV for RAG-Lite")
                 print("   exit | quit | clear\n")
                 continue
 
-            chat_with_server(server_url, prompt, mode, image)
+            chat_with_server(server_url, prompt, mode, image, document, api_key)
+            # Match web UI: attachments apply to one message only
+            image = None
+            document = None
 
         except (KeyboardInterrupt, EOFError):
             print("\nExiting Shell-Mind...")
             break
+
 
 
 if __name__ == "__main__":

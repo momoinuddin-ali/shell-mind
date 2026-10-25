@@ -41,9 +41,23 @@ def _event_label(event: str) -> str:
 
 
 def _trim_to_last_session(data: list[dict]) -> list[dict]:
+    """Prefer an explicit session boundary (init / load|unload events);
+    fall back to a long idle gap so mixed timelines still chart cleanly."""
+    if not data:
+        return data
+    # Last hard boundary: an "init" sample starts a new server process.
+    last_init = None
+    for i, sample in enumerate(data):
+        ev = str(sample.get("event") or sample.get("label") or "")
+        if ev == "init" or ev.startswith("init"):
+            last_init = i
+    if last_init is not None and last_init > 0:
+        data = data[last_init:]
+    # Within that window, also split on long idle gaps (legacy behaviour).
     for i in range(1, len(data)):
         if data[i]["t"] - data[i - 1]["t"] > SESSION_GAP_S:
-            return data[i:]
+            data = data[i:]
+            break
     return data
 
 

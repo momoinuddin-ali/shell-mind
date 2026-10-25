@@ -62,6 +62,10 @@ const newChatBtn     = document.getElementById('newChatBtn');
 const clearAllBtn    = document.getElementById('clearAllBtn');
 const clockEl        = document.getElementById('clock');
 
+// Mobile drawer
+const menuBtn        = document.getElementById('menuBtn');
+const sidebarEl      = document.querySelector('.sidebar');
+
 // Attachments
 const attachBtn      = document.getElementById('attachBtn');
 const visionInput    = document.getElementById('visionInput');
@@ -87,27 +91,84 @@ setInterval(updateClock, 1000 * 30);
 
 async function checkBackend() {
   try {
-    const res = await fetch(`${SERVER_URL}/health`, { method: 'GET' });
+    const res = await fetch(`${SERVER_URL}/health`, { method: 'GET', headers: authHeaders() });
     if (res.ok) {
       const info = await res.json();
-      const vram = info.free_vram_gb != null ? ` · ${info.free_vram_gb} GB VRAM free` : '';
-      statusDot.style.background = '#3FB950';
-      statusDot.style.boxShadow = '0 0 8px #3FB950';
-      backendBar.textContent = `Backend: Connected (${SERVER_URL}) · ${info.tier ?? '?'} tier${vram}`;
+      const narrow = window.innerWidth <= 900;
+      const vram = info.free_vram_gb != null
+        ? (narrow ? ` · ${info.free_vram_gb}G` : ` · ${info.free_vram_gb} GB free`)
+        : '';
+      const auth = info.auth_required ? (narrow ? ' · key' : ' · auth on') : '';
+      const busy = info.busy ? ' · BUSY' : '';
+      const tier = info.tier ?? '?';
+      statusDot.style.background = info.busy ? '#C99B3D' : '#3FB950';
+      statusDot.style.boxShadow = `0 0 8px ${info.busy ? '#C99B3D' : '#3FB950'}`;
+      if (narrow) {
+        backendBar.textContent = `${tier}${vram}${auth}${busy}`;
+      } else {
+        backendBar.textContent = `Connected · ${tier}${vram}${auth}${busy}`;
+      }
+      backendBar.title = `Server: ${SERVER_URL}`;
     } else {
       throw new Error('not ok');
     }
   } catch (e) {
-    statusDot.style.background = '#C99B4D';
+    statusDot.style.background = '#C99B3D';
     statusDot.style.boxShadow = '0 0 8px #C99B3D';
-    backendBar.textContent = `Backend: ${SERVER_URL} (Status unknown — awaiting first prompt)`;
+    backendBar.textContent = 'Backend offline';
+    backendBar.title = SERVER_URL;
   }
 }
 backendBar.textContent = `Backend: searching...`;
-detectServer().then(url => {
+const serverReady = detectServer().then(url => {
   if (url !== SERVER_URL) SERVER_URL = url;
   checkBackend();
+  setInterval(checkBackend, 15000);  // refresh busy/VRAM status
+  return url;
 });
+
+// --- Authenticated fetch -------------------------------------------------
+function authHeaders(extra = {}) {
+  const key = localStorage.getItem('shellMindApiKey');
+  return key ? { ...extra, 'X-API-Key': key } : extra;
+}
+
+async function serverFetch(path, opts = {}) {
+  await serverReady;
+  const doFetch = () => fetch(`${SERVER_URL}${path}`, {
+    ...opts,
+    headers: authHeaders(opts.headers),
+  });
+  let res = await doFetch();
+  if (res.status === 401) {
+    localStorage.removeItem('shellMindApiKey');  // old/rotated key — force re-prompt
+    const key = prompt(
+      'This server requires an API key (or the previous key was rotated).\n' +
+      'Enter the current key from the server owner:'
+    );
+    if (key) {
+      localStorage.setItem('shellMindApiKey', key.trim());
+      res = await doFetch();
+      if (res.status === 401) {
+        localStorage.removeItem('shellMindApiKey');
+      }
+    }
+  }
+  return res;
+}
+
+function friendlyError(status, detail) {
+  if (status === 429) {
+    return 'Rate limit reached — too many requests from this device. Wait about a minute and try again.';
+  }
+  if (status === 503) {
+    return detail || 'Server is busy with another request. Retry in a moment.';
+  }
+  if (status === 401) {
+    return 'API key rejected. If the owner rotated the key, enter the new one when prompted.';
+  }
+  return detail || `Server returned status ${status}`;
+}
 
 // --- Message Rendering & <think> Parsing ---
 function renderMessages() {
@@ -122,7 +183,6 @@ function renderMessages() {
     div.className = `msg ${msg.role}${msg.error ? ' error' : ''}`;
 
     if (msg.role === 'bot' && !msg.error) {
-      // Parse <think> tags for the Expander
       const text = msg.text;
       const thinkMatch = text.match(/<think>([\s\S]*?)<\/think>/);
 
@@ -149,7 +209,6 @@ function renderMessages() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-// --- Neural Network Loader ---
 function showTypingIndicator() {
   const div = document.createElement('div');
   div.className = 'neural-loader';
@@ -166,6 +225,40 @@ function showTypingIndicator() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+
+function persistThreads() {
+  const MAX_THREADS = 30;
+  const MAX_MSG_CHARS = 8000;
+  try {
+    localStorage.setItem('shellMindThreads', JSON.stringify(allThreads));
+  } catch (err) {
+    // QuotaExceededError or similar — prune oldest, trim huge messages, retry once
+    try {
+      let threads = Array.isArray(allThreads) ? allThreads.slice() : [];
+      if (threads.length > MAX_THREADS) {
+        threads = threads
+          .slice()
+          .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+          .slice(0, MAX_THREADS);
+      }
+      threads = threads.map(t => ({
+        ...t,
+        messages: (t.messages || []).map(m => ({
+          ...m,
+          content: typeof m.content === 'string' && m.content.length > MAX_MSG_CHARS
+            ? m.content.slice(0, MAX_MSG_CHARS) + '\n…[truncated]'
+            : m.content,
+        })),
+      }));
+      allThreads = threads;
+      localStorage.setItem('shellMindThreads', JSON.stringify(allThreads));
+    } catch (_) {
+      // give up silently — history is best-effort
+    }
+  }
+}
+
+
 function removeTypingIndicator() {
   const el = document.getElementById('typingIndicator');
   if (el) el.remove();
@@ -173,10 +266,8 @@ function removeTypingIndicator() {
 
 async function sendMessage(text) {
   if (!text || !text.trim()) return;
-  if (sendBtn.disabled) return;   // blocks double-send with Enter key
+  if (sendBtn.disabled) return;
 
-  // Capture the thread BEFORE any await so replies land in the right
-  // conversation even if the user switches threads mid-request.
   const thread = currentThread;
   let entry = allThreads[activeThreadIndex];
 
@@ -203,11 +294,10 @@ async function sendMessage(text) {
     const selectedMode = document.getElementById('modeSelect').value;
     const payload = { prompt: text, mode: selectedMode };
 
-    // Attach server-issued paths (returned by /upload endpoints)
     if (currentImagePath) payload.image_path = currentImagePath;
     if (currentPdfPath) payload.document_path = currentPdfPath;
 
-    const res = await fetch(`${SERVER_URL}/chat`, {
+    const res = await serverFetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -216,7 +306,7 @@ async function sendMessage(text) {
     removeTypingIndicator();
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
-      throw new Error(detail.detail || `Server returned status ${res.status}`);
+      throw new Error(friendlyError(res.status, detail.detail));
     }
 
     const data = await res.json();
@@ -225,7 +315,6 @@ async function sendMessage(text) {
     statusDot.style.background = '#3FB950';
     statusDot.style.boxShadow = '0 0 8px #3FB950';
 
-    // Clear attachments after successful send
     currentImagePath = null;
     currentPdfPath = null;
     imageIndicator.style.display = 'none';
@@ -238,23 +327,25 @@ async function sendMessage(text) {
     thread.push({
       role: 'bot',
       error: true,
-      text: `⚠ Server ${SERVER_URL} not reachable.\nDetail: ${err.message}`
+      text: `⚠ ${err.message}`
     });
     statusDot.style.background = '#B84A4A';
     statusDot.style.boxShadow = '0 0 8px #B84A4A';
   }
 
-  // Save to local storage
   entry.messages = thread;
-  localStorage.setItem('shellMindThreads', JSON.stringify(allThreads));
+  persistThreads();
 
   renderMessages();
   sendBtn.disabled = false;
   promptInput.focus();
+  checkBackend();
 }
 
 sendBtn.addEventListener('click', () => sendMessage(promptInput.value));
 promptInput.addEventListener('keydown', (e) => {
+  // L5: do not send while IME composition is active (CJK input)
+  if (e.isComposing || e.keyCode === 229) return;
   if (e.key === 'Enter') sendMessage(promptInput.value);
 });
 
@@ -264,24 +355,62 @@ document.querySelectorAll('.chip').forEach(chip => {
   });
 });
 
-// --- Sidebar Buttons ---
 newChatBtn.addEventListener('click', () => {
+  // L6: reuse an already-empty active thread instead of spawning empties
+  if (Array.isArray(currentThread) && currentThread.length === 0) {
+    const active = allThreads[activeThreadIndex];
+    if (active && Array.isArray(active.messages) && active.messages.length === 0) {
+      renderMessages();
+      return;
+    }
+  }
   currentThread = [];
   allThreads.unshift({ title: "New Chat", messages: [] });
   activeThreadIndex = 0;
-  localStorage.setItem('shellMindThreads', JSON.stringify(allThreads));
+  persistThreads();
   renderThreadList();
   renderMessages();
 });
 
 clearAllBtn.addEventListener('click', () => {
-  if(confirm("Are you sure you want to delete all local chat history?")) {
+  if (confirm("Delete all local chat history and forget the stored API key on this device?")) {
     allThreads = [];
     currentThread = [];
     localStorage.removeItem('shellMindThreads');
+    localStorage.removeItem('shellMindApiKey');
     renderThreadList();
     renderMessages();
   }
+});
+
+const backdropEl = document.getElementById('sidebarBackdrop');
+
+function closeSidebar() {
+  sidebarEl.classList.remove('open');
+  if (backdropEl) backdropEl.classList.remove('visible');
+}
+function openSidebar() {
+  sidebarEl.classList.add('open');
+  if (backdropEl) backdropEl.classList.add('visible');
+}
+function toggleSidebar() {
+  if (sidebarEl.classList.contains('open')) closeSidebar();
+  else openSidebar();
+}
+
+menuBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  toggleSidebar();
+});
+if (backdropEl) backdropEl.addEventListener('click', closeSidebar);
+document.querySelector('.main')?.addEventListener('click', () => {
+  if (window.innerWidth <= 900) closeSidebar();
+});
+threadListEl.addEventListener('click', () => {
+  if (window.innerWidth <= 900) closeSidebar();
+});
+newChatBtn.addEventListener('click', () => {
+  if (window.innerWidth <= 900) closeSidebar();
 });
 
 function renderThreadList() {
@@ -302,9 +431,6 @@ function renderThreadList() {
   });
 }
 
-// --- Attachments (Image & Document) ---
-// Server-side paths are opaque tokens to this client: upload first, then
-// send the returned path back with the next /chat request.
 attachBtn.addEventListener('click', () => visionInput.click());
 visionInput.addEventListener('change', async () => {
   const file = visionInput.files[0];
@@ -312,7 +438,7 @@ visionInput.addEventListener('change', async () => {
   const formData = new FormData();
   formData.append('file', file);
   try {
-    const res = await fetch(`${SERVER_URL}/upload_image`, { method: 'POST', body: formData });
+    const res = await serverFetch('/upload_image', { method: 'POST', body: formData });
     if (res.ok) {
       const data = await res.json();
       currentImagePath = data.image_path;
@@ -320,7 +446,7 @@ visionInput.addEventListener('change', async () => {
       imageIndicator.style.display = 'block';
     } else {
       const detail = await res.json().catch(() => ({}));
-      alert(`Image upload rejected: ${detail.detail || `HTTP ${res.status}`}`);
+      alert(`Image upload rejected: ${friendlyError(res.status, detail.detail)}`);
     }
   } catch (err) {
     alert(`Image upload failed — is the backend running at ${SERVER_URL}?`);
@@ -339,14 +465,14 @@ pdfInput.addEventListener('change', async () => {
   pdfIndicator.style.display = 'block';
 
   try {
-    const res = await fetch(`${SERVER_URL}/upload`, { method: 'POST', body: formData });
+    const res = await serverFetch('/upload', { method: 'POST', body: formData });
     if (res.ok) {
         const data = await res.json();
         currentPdfPath = data.document_path;
-        pdfName.textContent = file.name + " (Ready for processing)";
+        pdfName.textContent = file.name + " (Ready — first 3 pages / 3k chars)";
     } else {
         const detail = await res.json().catch(() => ({}));
-        alert(`Document upload rejected: ${detail.detail || `HTTP ${res.status}`}`);
+        alert(`Document upload rejected: ${friendlyError(res.status, detail.detail)}`);
         pdfIndicator.style.display = 'none';
     }
   } catch (err) {

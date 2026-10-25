@@ -18,12 +18,13 @@ import logging
 import time
 
 from . import agents, router
-from .model_zoo import get_zoo
+from .model_zoo import get_zoo, has_model, role_key
 
 log = logging.getLogger("shell-mind.mind")
 
 
-def run_agentic_pipeline(prompt: str, image_path: str | None = None) -> dict:
+def run_agentic_pipeline(prompt: str, image_path: str | None = None,
+                          document_context: str = "") -> dict:
     zoo = get_zoo()
     t0 = time.perf_counter()
     stages: list[tuple[str, float]] = []
@@ -39,8 +40,13 @@ def run_agentic_pipeline(prompt: str, image_path: str | None = None) -> dict:
     if task == "vision_only" and not image_path:
         task = "chat"
 
+    # Contradictory router output: vision_only + image must always run vision
+    # even if needs_vision was false (1.5B can disagree with itself).
+    if task == "vision_only" and image_path:
+        plan["needs_vision"] = True
+
     # 2) vision (optional) -> compact text CONTEXT for the worker
-    vision_ready = image_path is not None and zoo.has_model("vision")
+    vision_ready = image_path is not None and has_model(role_key("vision"))
     if task == "vision_only" and not vision_ready:
         return {
             "answer": ("⚠️ This request needs the vision specialist, but "
@@ -63,6 +69,10 @@ def run_agentic_pipeline(prompt: str, image_path: str | None = None) -> dict:
         else:
             log.warning("vision model not downloaded yet — running text-only")
 
+    # RAG-Lite document text is for workers/critic only — never fed to the router.
+    if document_context:
+        context = (context + "\n\n" + document_context).strip() if context else document_context
+
     est_tokens = plan["prompt_tokens"] + len(context) // 4
 
     # 3) exactly one worker wakes (vision_only goes straight to the critic)
@@ -71,8 +81,23 @@ def run_agentic_pipeline(prompt: str, image_path: str | None = None) -> dict:
     if task == "vision_only" and context:
         draft, context = context, ""        # the summary IS the draft
     elif task == "code":
+        code_key = role_key("code")
+        if not has_model(code_key):
+            return {
+                "answer": (
+                    "⚠️ The code specialist is not in the local model cache yet. "
+                    "Preload it on the GPU machine (one-time), then retry:\n\n"
+                    "  python -c \"from huggingface_hub import snapshot_download; "
+                    "snapshot_download('Qwen/Qwen2.5-Coder-7B-Instruct')\"\n\n"
+                    "Or map a smaller cached model to the code role in models.json. "
+                    "See README → Model Registry."
+                ),
+                "task": "code",
+                "stages": [(s, round(d, 2)) for s, d in stages],
+                "total_s": round(time.perf_counter() - t0, 1),
+            }
         draft = agents.code(prompt, context, prompt_tokens=est_tokens)
-    elif task == "reasoning" and zoo.has_model("thinker"):
+    elif task == "reasoning" and has_model(role_key("reasoning")):
         draft = agents.think(prompt, context)
     elif task == "reasoning":
         log.warning("thinker not downloaded yet — critic answers directly")

@@ -2,21 +2,25 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Local AI Workspace — Shell-Mind</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Shell-Mind</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="app">
   <div class="titlebar">
+    <button class="hamburger" id="menuBtn" title="Menu" aria-label="Open menu">☰</button>
     <span id="clock">--:--</span>
     <div class="status-dot" id="statusDot"></div>
   </div>
 
   <div class="body-row">
+    <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
     <!-- Sidebar -->
-    <div class="sidebar">
-      <div class="brand">⚡ Local AI Workspace</div>
+    <div class="sidebar" id="sidebar">
+      <div class="brand">⚡ Shell-Mind</div>
       <button class="new-chat-btn" id="newChatBtn">➕ New Chat</button>
 
       <div class="divider"></div>
@@ -25,7 +29,7 @@
       
       <div class="divider"></div>
       <div class="section-label">📁 DOCUMENT CONTEXT (≤ 25 MB)</div>
-      <div class="upload-zone" id="uploadZone" title="Upload PDF / TXT / CSV">
+      <div class="upload-zone" id="uploadZone" title="Upload PDF / TXT / CSV (first 3 pages / 3k chars used)">
         <div class="upload-icon">📄</div>
         <div class="upload-text">Upload PDF / TXT / CSV</div>
         <input type="file" id="pdfInput" accept=".pdf,.txt,.csv" style="display:none;">
@@ -34,7 +38,7 @@
       <div class="divider"></div>
       <div class="section-label">⚙️ COMPUTE MODE</div>
       <select id="modeSelect" class="mode-dropdown">
-        <option value="cpu">CPU Lite (0.5B - Fast)</option>
+        <option value="cpu">CPU Lite (0.5B - No GPU)</option>
         <option value="gpu" selected>GPU Copilot (7B - Standard)</option>
         <option value="agent">Agent Workstation (Multi-Model)</option>
       </select>
@@ -50,7 +54,7 @@
         <div class="messages" id="messages">
           <div class="empty-state" id="emptyState">
             <div class="empty-title">New Chat</div>
-            <div class="empty-sub">Backend: RTX 5050 4-Bit | 100% Local Processing</div>
+            <div class="empty-sub">Backend: 100% Local Processing</div>
             <div class="chips">
               <div class="chip" data-text="Analyze a C++ pointer error">Analyze C++ bug</div>
               <div class="chip" data-text="Explain the multi-agent architecture">Explain Architecture</div>
@@ -63,7 +67,7 @@
           📎 Attached Image: <span id="imageName"></span>
         </div>
         <div id="pdfIndicator" class="attachment-indicator" style="display:none; color: #4A90E2;">
-          📄 Attached PDF: <span id="pdfName"></span>
+          📄 Attached doc: <span id="pdfName"></span>
         </div>
         
         <div class="input-row">
@@ -71,7 +75,7 @@
             <button class="attach-btn" id="attachBtn" title="Attach Image">📎</button>
             <input type="file" id="visionInput" accept="image/png, image/jpeg, image/gif" style="display:none;">
             
-            <input type="text" id="promptInput" placeholder="Ask your local model anything...">
+            <input type="text" id="promptInput" placeholder="Ask your local model anything..." enterkeyhint="send" autocomplete="off">
             <button class="send-btn" id="sendBtn">➤</button>
           </div>
         </div>

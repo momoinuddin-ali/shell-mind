@@ -1,0 +1,29 @@
+{
+  "_comment": "Copy this file to models.json (gitignored) and edit freely. Keys starting with underscore are documentation only and are ignored by the loader. Valid roles: router, vision, code, reasoning, critic, copilot_gpu, copilot_cpu. On 8 GB VRAM, stay in the same size class as the defaults (approx 0.5-8B quantized). Custom models should be preloaded with huggingface_hub.snapshot_download before use.",
+
+  "models": {
+    "router":  { "hf_id": "Qwen/Qwen2.5-1.5B-Instruct", "vram_gb": 1.2 },
+    "vision":  { "hf_id": "Qwen/Qwen3-VL-8B-Instruct", "vram_gb": 6.0, "vision": true },
+    "coder7":  { "hf_id": "Qwen/Qwen2.5-Coder-7B-Instruct", "vram_gb": 5.2 },
+    "thinker": { "hf_id": "Qwen/Qwen3-8B", "vram_gb": 5.5 },
+    "critic":  { "hf_id": "Qwen/Qwen3-4B-Instruct-2507", "vram_gb": 3.0 },
+    "cpu05":   { "hf_id": "Qwen/Qwen2.5-0.5B-Instruct", "vram_gb": 0.5 },
+
+    "_example_custom": {
+      "_comment": "This key is ignored (underscore prefix). To use a custom model: copy to a real key name (e.g. mycoder), set hf_id, preload weights, then point a role at it.",
+      "hf_id": "Qwen/Qwen2.5-3B-Instruct",
+      "vram_gb": 2.2,
+      "fallback": "coder7"
+    }
+  },
+
+  "roles": {
+    "router": "router",
+    "vision": "vision",
+    "code": "coder7",
+    "reasoning": "thinker",
+    "critic": "critic",
+    "copilot_gpu": "coder7",
+    "copilot_cpu": "cpu05"
+  }
+}

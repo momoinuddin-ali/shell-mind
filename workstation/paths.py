@@ -15,6 +15,9 @@ repo (a parents[2] bug). If that legacy cache exists and the new location
 does not, we keep using it so nobody re-downloads ~100 GB of weights.
 Point SHELL_MIND_MODELS_DIR at the old directory (or move it to
 <repo>/models) to control the migration yourself.
+
+User model configuration lives in models.json at the repo root
+(see models.example.json and the load_registry() logic in model_zoo.py).
 """
 
 from __future__ import annotations
@@ -45,3 +48,6 @@ UPLOADS_DIR = REPO_ROOT / "uploads"
 DB_PATH = Path(os.environ.get("SHELL_MIND_DB",
                               REPO_ROOT / "shell_mind_history.db"))
 TIMELINE_PATH = REPO_ROOT / "vram_timeline.json"
+# User model-configuration overlay (parsed by model_zoo.load_registry).
+# Copy models.example.json → models.json and edit freely.
+CONFIG_PATH = REPO_ROOT / "models.json"

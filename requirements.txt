@@ -9,5 +9,6 @@ python-multipart          # required by FastAPI for file uploads
 httpx                     # required by tests/test_server_contract.py
 requests
 pillow
-PyPDF2
+pypdf
 matplotlib
+huggingface_hub>=0.23

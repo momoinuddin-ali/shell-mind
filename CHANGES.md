@@ -1,144 +1,106 @@
-# Shell-Mind — Professionalization Changelog (October 2026)
+# Shell-Mind — Changelog & Development Timeline
 
-Full record of the hardening pass applied after the October 7 code analysis.
-Everything below is **verified**: 20/20 automated contract tests pass, and the
-server was exercised end-to-end on the RTX 5050 (three live agent pipelines:
-114.6 s, 91.3 s, 52.5 s) with the GUI served by the backend and the CLI
-running against it.
+This file is the single chronological record of how Shell-Mind evolved.
+It merges: the original mini-project build, the October 2026 hardening
+pass (analysis + fixes), the security pass, mobile/Tailscale polish, and
+the models.json customization layer.
 
-## File-by-file: before → after
+---
 
-| File | Before | After | What changed |
-|------|-------:|------:|--------------|
-| `primary_node/ai_core.py` | 229 | 380 | Rewritten (see below) |
-| `workstation/model_zoo.py` | 255 | 266 | Path anchoring, timeline `total_gb`, `note()` |
-| `workstation/orchestrator.py` | 76 | 96 | Honest vision-only refusal |
-| `workstation/paths.py` | — | 47 | **NEW** — single source of truth for filesystem locations |
-| `workstation/smoke_test.py` | 159 | 159 | Timeline dump path (1 line) |
-| `workstation/agents.py` | 216 | 216 | Unchanged (already correct) |
-| `workstation/router.py` | 126 | 126 | Unchanged (already correct) |
-| `cli.py` | 175 | 211 | Image upload flow, honest menu, ping fix |
-| `frontend/script.js` | 622 | 359 | Dead code removed + detection hardened |
-| `frontend/index.html` | 84 | 84 | Label/accept fixes |
-| `frontend/style.css` | 154 | 154 | Unchanged |
-| `vram_chart.py` | 54 | 161 | CLI args, session trim, label collision resolver |
-| `README.md` | 287 | 317 | Rewritten to match reality |
-| `requirements.txt` (root) | — | 13 | **NEW** (was only `primary_node/requirements.txt`) |
-| `tests/test_server_contract.py` | — | 213 | **NEW** — 20 API contract tests |
-| `.gitignore` / `.zcodeignore` | 18 | 18 | Cleaned, mangled `*.db` line fixed |
-| `supervisor/safety.py` | 19 | — | **DELETED** (dead code, fake "sandbox") |
-| `primary_node/requirements.txt` | 10 | — | **DELETED** (replaced by root file) |
+## Timeline (straightened)
 
-## Bugs fixed
+| When | What happened |
+|------|----------------|
+| **Sep–early Oct 2026** | Core system built for the 3rd-semester mini-project: Zero-Sum VRAM orchestration, 3-tier engine (CPU / GPU Copilot / Agent), FastAPI server, vanilla UI, CLI, smoke tests, SQLite audit log. Team: Moinuddin, Imtiyaz, Ayaan, Himanshu (SSTC Bhilai). |
+| **~Oct 7** | External code review (Z / GLM session) of the live repo. Found 10 real bugs: cache path outside repo (`parents[2]`), missing root `requirements.txt`, broken CLI remote image, arbitrary file read via `/chat`, eager model load blocking boot, dead unsafe “sandbox”, vision-only hallucination, CLI health mismatch, dual-server GUI confusion, CWD-relative paths. |
+| **Oct 7–8** | Professionalization pass applied on the GPU box: `paths.py`, lazy loading, secure uploads, path validation, backend serves UI, CLI image upload, contract tests, README honesty pass. Left uncommitted initially; then verified live (boot seconds, three agent pipelines 52–115 s, VRAM returns to baseline). |
+| **Oct 9** | Security pass: optional `SHELL_MIND_API_KEY`, upload storage cap, client IP in audit log, Tailscale-only bind documented. Contract suite 20 → 28 tests. |
+| **Oct 10–11** | Docs fixes (`cpu05`, test counts, models.json section). Mobile UI redraw (drawer + backdrop). Rate limiting + busy 503. `setup.sh` key rotation. End-to-end success from Android over Tailscale (`gpu · 0.88G · key`, chat 200). |
+| **Current** | models.json role system is the supported way to customize Hugging Face models. **No GUI model picker** (server-owner config by design for v1). |
 
-1. **Model cache written outside the repo.** `parents[2]` in `model_zoo.py`
-   and `ai_core.py` resolved to the *parent* of the repo, so `models/` and
-   `offload_cache/` landed outside the project (verified on disk). Fixed via
-   `workstation/paths.py` (`REPO_ROOT = parents[1]`), with a legacy fallback
-   that keeps using the existing out-of-repo cache so no weights re-download.
-2. **README quick start failed on a fresh clone.** `pip install -r
-   requirements.txt` pointed at a nonexistent root file. Root
-   `requirements.txt` now exists and gains the silently-missing
-   `matplotlib`, `python-multipart` (required for uploads),
-   `httpx` (required by tests).
-3. **CLI remote image attach was broken.** `cli.py` sent a client-local path
-   as `image_path`; the server tried to open it locally. Works only when CLI
-   and server share a filesystem — broken for the advertised Tailscale use
-   case. The CLI now POSTs the file to `/upload_image` first and uses the
-   server-issued path.
-4. **Arbitrary file read via `/chat`.** `document_path`/`image_path` were
-   opened from anywhere on the server filesystem (LAN-exposed, 0.0.0.0 +
-   CORS `*`). `/chat` now accepts only paths inside the server-managed
-   `uploads/` directory — anything else gets HTTP 400/404. Combined with
-   UUID filenames + extension whitelist + 25 MB cap + proper 413/415 codes
-   + 24 h stale-upload purge.
-5. **Server unreachable for minutes at boot.** The 7B copilot loaded at
-   module import, blocking uvicorn startup (and downloading 5+ GB on first
-   run before serving). All tiers now load lazily on first use; the server
-   accepts requests within seconds. Confirmed live: boot at 03:41:25, first
-   model load at 03:42:20, on demand.
-6. **`supervisor/safety.py` was a footgun.** Dead code whose
-   `run_sandboxed()` executed arbitrary Python with full privileges behind
-   a 4-string blocklist. Deleted before it could ever be wired into the
-   agent loop.
-7. **Vision-only hallucination.** A vision-only request with the vision
-   model not downloaded let the critic "answer" an image it never saw. The
-   orchestrator now refuses with a clear message.
-8. **CLI `ping()` read a nonexistent `/health` field** (`default_model`) —
-   always printed `?`. Fixed.
-9. **Frontend pointed at the wrong server.** The first autodetect heuristic
-   (same-origin) made the GUI talk to a static file server when one was
-   used, producing 404/501 errors. The backend now **serves the frontend
-   itself** at `/` (one terminal, no static server), and `script.js` probes
-   candidates (`?server=` → same origin → `localhost:8000` →
-   `127.0.0.1:8000`) for a live `/health` before committing.
-10. **DB, timeline, uploads, offload paths were CWD-relative.** They landed
-    wherever uvicorn was launched from. All anchored to the repo root via
-    `paths.py`; `SHELL_MIND_MODELS_DIR` / `SHELL_MIND_DB` env overrides
-    available.
+---
 
-## README claims corrected
+## File-by-file (hardening baseline → current)
 
-- `coder30` marked **disabled by default**, with the bitsandbytes
-  fp32-offload rationale (the GPU+DDR5 split is impractical under bnb;
-  GGUF/llama.cpp is the future path). Registry, fallback wiring and smoke
-  target retained for a flag-flip integration later.
-- "Every load is preceded by a live VRAM measurement" scoped to reality:
-  VRAM is measured and *recorded* around every load, pre-flight fit checks
-  exist for the offload path, and the fallback chain is `coder30 → coder7`
-  (un-routable failures purge VRAM and return a clean error).
-- Swap-latency cost stated up front: ~5–15 s per model load, 1–3 min agent
-  runs — the price of zero-sum orchestration on 8 GB.
-- Router described as "resident between stages; parked while heavy workers
-  run" (it was previously both "always-resident" and parked — contradictory).
-- Audit log called *append-only*, not "immutable".
-- UI label corrected from "200 MB" to the real 25 MB limit.
-- New **Limitations** section and **Security note** (no auth — trusted
-  network only).
+| File | Role in the system |
+|------|--------------------|
+| `primary_node/ai_core.py` | FastAPI: lazy tiers, secure uploads, API key, rate limit, busy lock, serves frontend |
+| `workstation/paths.py` | **NEW** — all paths anchored to repo root (+ legacy cache fallback) |
+| `workstation/model_zoo.py` | Load/unload, VRAM timeline, `models.json` registry + roles |
+| `workstation/orchestrator.py` | Router → vision → worker → critic; honest vision refusal |
+| `workstation/agents.py` | wake → work → sleep specialists (via `role_key`) |
+| `workstation/router.py` | 1.5B planner → JSON plan |
+| `workstation/smoke_test.py` | Hardware acceptance (load / generate / free VRAM) |
+| `cli.py` | Thin client; uploads images before chat; `--key` |
+| `frontend/*` | Glassmorphism UI, mobile drawer, auth prompt, short status |
+| `tests/test_server_contract.py` | **NEW** — GPU-less API contract suite (~28 tests) |
+| `setup.sh` | Server/client onboarding + **key rotation** |
+| `models.example.json` | Template for custom HF model IDs |
+| `SECURITY.md` | API key threat model and rotation |
+| `vram_chart.py` | Portfolio chart from timeline |
+| `supervisor/safety.py` | **DELETED** (fake sandbox / RCE footgun) |
 
-## New capabilities
+---
 
-- **One-terminal workflow**: `uvicorn primary_node.ai_core:app` serves both
-  the API and the web UI at `http://localhost:8000`.
-- **Real CPU tier on GPU hosts**: selecting `cpu` mode runs the 0.5B model
-  on the CPU and leaves the GPU completely free (previously the CPU choice
-  silently used the GPU model).
-- **VRAM timeline completeness**: copilot loads/unloads are recorded on the
-  same timeline as agent-zoo swaps (`ModelZoo.note()`), and every sample
-  includes `total_gb` so charts are self-describing.
-- **Chart robustness**: `vram_chart.py` grew `--in/--out/--last` args, trims
-  to the latest session (no more multi-hour dead axis), uses readable event
-  labels, and resolves label collisions by measuring rendered boxes.
-- **Contract test suite** (`python tests/test_server_contract.py`): stubs
-  torch/transformers, runs GPU-less on any machine, locks in upload rules,
-  path validation, status codes, RAG injection and audit logging — 20 tests.
+## Bugs fixed (the original 10 + follow-ons)
 
-## Frontend cleanup
+1. Model cache written **outside** the repo (`parents[2]`) — fixed + legacy fallback  
+2. README quick start failed (no root `requirements.txt`)  
+3. CLI remote image broken — now uploads via `/upload_image`  
+4. Arbitrary file read via `/chat` — only server-issued upload paths  
+5. Server blocked for minutes at boot — lazy model load  
+6. Dead unsafe `supervisor/safety.py` — deleted  
+7. Vision-only hallucination — refuse if VLM missing  
+8. CLI `/health` field mismatch  
+9. GUI pointed at static server — backend serves UI + health probe  
+10. CWD-relative DB/timeline/uploads — anchored via `paths.py`  
 
-- 310 lines of commented-out duplicate code removed from `script.js`
-  (622 → 359 lines, zero behavior lost).
-- Corrupted `localStorage` no longer bricks the UI (guarded parse + reset).
-- Upload rejections surface the server's actual error (e.g. "type not
-  allowed") instead of a generic alert.
-- `.gif` accepted end-to-end (input filter + server whitelist).
+**Later:** API key auth, rate limit, busy 503, mobile layout, key rotation in `setup.sh`, models.json documentation.
+
+---
+
+## Product framing
+
+Shell-Mind is **not** a hosted service with separate “our servers” and
+“customers.” A user clones the repo and runs the backend themselves. The
+HTTP API + web UI + CLI are how *that same* process is used from localhost
+or from other personal/team devices (often via Tailscale). Zero-sum VRAM
+orchestration is the core claim: a full multi-agent pipeline on an 8 GB
+card; larger hardware uses larger models through `models.json`.
+
+## Customization decision (models)
+
+**What we ship in v1**
+
+- Server owner edits `models.json` (copy from `models.example.json`).
+- Any Hugging Face `hf_id` can fill a pipeline **role**.
+- On first use, weights download into the local HF cache under `models/`.
+- Missing custom models fall back to built-in defaults so chat never hard-crashes.
+- Phone/GUI users **do not** pick models — they only chat. That keeps 8 GB VRAM and multi-GB downloads under the server owner’s control.
+
+**What we deliberately did *not* build yet**
+
+- In-GUI model picker / “paste HF ID and download with progress”
+- Reason: multi-GB downloads inside a chat request are a bad UX and easy to OOM the card.
+
+That GUI remains **future work**, not a missing bug.
+
+---
 
 ## Verification evidence (live, RTX 5050)
 
-From the server log after this pass:
+- Boot in seconds; first model load on demand (~16 s for 7B copilot).  
+- Zero-sum: unload returns free VRAM to within ~0.1 GB of baseline.  
+- Agent pipelines completed in ~1–2 minutes with stage timings.  
+- Android client over Tailscale: auth key, mobile drawer, `POST /chat 200`.  
+- Contract tests run without GPU.
 
-- `GET / 200` — backend serves the GUI.
-- Boot 03:41:25 → first model load 03:42:20 — lazy loading confirmed.
-- Zero-sum discipline: thinker unload → 6.3 GB free; critic + router
-  coexist → 2.7 GB free; every unload returns to ~0.1 GB of baseline.
-- Timeline written to the repo root: `.../shell-mind/vram_timeline.json`.
-- Three full pipelines completed: 114.6 s, 91.3 s, 52.5 s; router ≈ 0.3 s,
-  thinker load ≈ 15–17 s, critic load ≈ 9 s.
-- Audit log at `.../shell-mind/shell_mind_history.db`.
+---
 
 ## Known optional follow-ups
 
-- Set `HF_HUB_OFFLINE=1` once all models are cached — skips the ~10 s of
-  Hugging Face HEAD requests per load and silences the unauthenticated-
-  requests warning. (Or set `HF_TOKEN`.)
-- `favicon.ico` 404 — cosmetic; add one if it bothers you.
-- Streaming responses (SSE/WebSockets) remains future work.
+- `HF_HUB_OFFLINE=1` after all models are cached (skips HF HEAD noise).  
+- `favicon.ico` (cosmetic 404).  
+- Streaming (SSE/WebSockets).  
+- Optional Settings UI for models.json (future).  
+- GGUF backend for `coder30`.

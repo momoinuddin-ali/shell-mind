@@ -9,7 +9,7 @@ VRAM discipline (measured on this RTX 5050, not guessed):
   * Big workers (vision / coder / thinker) PARK the router while they
     work — router (1.2 GB) + a 7-8B worker leaves 0.1 GB, not enough
     for a real prompt's KV cache.
-  * The critic coexists with the router (3.3 + 1.2 GB — plenty of room).
+  * The critic coexists with the router (3.0 + 1.2 GB — plenty of room).
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from .model_zoo import get_zoo          
+from .model_zoo import get_zoo, role_key
 
 log = logging.getLogger("shell-mind.agents")
 
@@ -69,7 +69,7 @@ def see(image_path: str | Path, question: str) -> str:
     zoo.unload_resident()
     model = proc = img = inputs = out = msgs = None
     try:
-        model, proc = zoo.load_worker("vision")
+        model, proc = zoo.load_worker(role_key("vision"))
         img = Image.open(image_path).convert("RGB")
         img.thumbnail((1408, 1408))
         msgs = [{"role": "user", "content": [
@@ -92,7 +92,7 @@ def see(image_path: str | Path, question: str) -> str:
         model = proc = img = inputs = out = msgs = None
         zoo.unload_worker()
         try:
-            zoo.load_resident("router")
+            zoo.load_resident(role_key("router"))
         except Exception:
             log.warning("router wake failed after vision stage — "
                         "it will lazy-reload on the next request")
@@ -113,13 +113,18 @@ def code(question: str, context: str = "", prompt_tokens: int = 0) -> str:
     if use30:
         log.info("coder: using Qwen3-Coder-30B-A3B (MoE, GPU+RAM split)")
     else:
-        log.info("coder: using Qwen2.5-Coder-7B%s",
-                 "" if prompt_tokens >= 4000 else " (30B bypassed)")
+        # Only mention 30B when that path is enabled but not chosen for this request
+        suffix = ""
+        if CODER30_ENABLED and prompt_tokens < 4000 and not zoo.has_model("coder30"):
+            suffix = " (30B not in cache)"
+        elif CODER30_ENABLED and prompt_tokens >= 4000:
+            suffix = " (30B skipped — long context)"
+        log.info("coder: using Qwen2.5-Coder-7B%s", suffix)
     
     zoo.unload_resident()
     model = tok = None
     try:
-        model, tok = zoo.load_worker("coder30" if use30 else "coder7")
+        model, tok = zoo.load_worker("coder30" if use30 else role_key("code"))
         user = (f"Context:\n{context}\n\n" if context else "") + question
         draft = _generate(model, tok, _chat_text(tok, _CODER_SYSTEM, user),
                           max_new_tokens=1200)
@@ -131,7 +136,7 @@ def code(question: str, context: str = "", prompt_tokens: int = 0) -> str:
         model = tok = None
         zoo.unload_worker()
         try:
-            zoo.load_resident("router")
+            zoo.load_resident(role_key("router"))
         except Exception:
             log.warning("router wake failed after coder stage — "
                         "it will lazy-reload on the next request")
@@ -148,7 +153,7 @@ def think(question: str, context: str = "") -> str:
     zoo.unload_resident()
     model = tok = None
     try:
-        model, tok = zoo.load_worker("thinker")
+        model, tok = zoo.load_worker(role_key("reasoning"))
         user = (f"Context:\n{context}\n\n" if context else "") + question
         draft = _generate(model, tok, _chat_text(tok, _THINK_SYSTEM, user),
                           max_new_tokens=2500)
@@ -160,7 +165,7 @@ def think(question: str, context: str = "") -> str:
         model = tok = None
         zoo.unload_worker()
         try:
-            zoo.load_resident("router")
+            zoo.load_resident(role_key("router"))
         except Exception:
             log.warning("router wake failed after thinker stage — "
                         "it will lazy-reload on the next request")
@@ -179,7 +184,7 @@ def critique(question: str, context: str, draft: str) -> str:
     zoo = get_zoo()
     model = tok = None
     try:
-        model, tok = zoo.load_worker("critic")
+        model, tok = zoo.load_worker(role_key("critic"))
         user = (f"## Request\n{question}\n\n## Context\n{context or '(none)'}"
                 f"\n\n## Draft\n{draft}")
         final = _generate(model, tok, _chat_text(tok, _CRITIC_SYSTEM, user),

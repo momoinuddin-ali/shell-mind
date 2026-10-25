@@ -170,6 +170,16 @@ def main() -> None:
     check("oversize upload -> 413", r.status_code == 413, f"got {r.status_code}")
     ai_core.MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
+    print("upload storage cap:")
+    ai_core.UPLOADS_TOTAL_CAP_BYTES = 50
+    r = client.post("/upload", files={"file": ("fill.txt", b"y" * 200)})
+    check("total-storage overflow -> 413",
+          r.status_code == 413, f"got {r.status_code}")
+    leftovers = [f for f in paths.UPLOADS_DIR.iterdir() if f.name != stored.name]
+    check("overflowed upload deleted", not leftovers,
+          str(leftovers))
+    ai_core.UPLOADS_TOTAL_CAP_BYTES = 500 * 1024 * 1024
+
     print("chat path validation:")
     r = client.post("/chat", json={"prompt": "hi", "mode": "cpu",
                                    "document_path": "/etc/passwd"})
@@ -199,6 +209,46 @@ def main() -> None:
     with sqlite3.connect(_TMP_DB) as conn:
         after = conn.execute("SELECT COUNT(*) FROM interactions").fetchone()[0]
     check("interaction appended to audit log", after == before + 1)
+    with sqlite3.connect(_TMP_DB) as conn:
+        last_client = conn.execute(
+            "SELECT client FROM interactions ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+    check("audit log records the client address",
+          last_client == "testclient", f"got {last_client!r}")
+
+    print("api-key guard (reload with SHELL_MIND_API_KEY set):")
+    import importlib
+    import primary_node.ai_core as ai_core_mod
+    os.environ["SHELL_MIND_API_KEY"] = "test-secret-key"
+    try:
+        locked_app = importlib.reload(ai_core_mod).app
+        locked = TestClient(locked_app)
+
+        r = locked.get("/health")
+        check("/health stays open with a key set", r.status_code == 200)
+
+        r = locked.post("/chat", json={"prompt": "hi", "mode": "cpu"})
+        check("/chat without key -> 401", r.status_code == 401,
+              f"got {r.status_code}")
+
+        r = locked.post("/chat", json={"prompt": "hi", "mode": "cpu"},
+                        headers={"X-API-Key": "wrong"})
+        check("/chat wrong key -> 401", r.status_code == 401,
+              f"got {r.status_code}")
+
+        r = locked.post("/upload", files={"file": ("a.txt", b"k")})
+        check("/upload without key -> 401", r.status_code == 401,
+              f"got {r.status_code}")
+        for f in paths.UPLOADS_DIR.iterdir():
+            f.unlink()          # nothing should have been written
+
+        r = locked.post("/chat", json={"prompt": "hi", "mode": "cpu"},
+                        headers={"X-API-Key": "test-secret-key"})
+        check("/chat with correct key -> 200", r.status_code == 200,
+              f"got {r.status_code}: {r.text[:120]}")
+    finally:
+        del os.environ["SHELL_MIND_API_KEY"]
+        importlib.reload(ai_core_mod)     # back to open mode
 
     # cleanup: remove files this test created in uploads/
     stored.unlink(missing_ok=True)

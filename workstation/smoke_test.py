@@ -2,13 +2,13 @@
 Acceptance test for the shell-mind workstation hardware.
 
 Verifies, per model: load -> generate -> measure tok/s -> unload -> VRAM
-actually freed. Plus a coexistence check (resident router + worker fit
+actually freed. Plus a coexistence check (resident router + critic fit
 together) — the core architecture claim.
 
 Usage (from the shell-mind repo root, venv active):
   python -m workstation.smoke_test              # fast set: router, critic, coder7
-  python -m workstation.smoke_test coder30      # the big MoE test
-  python -m workstation.smoke_test all          # everything (~120 GB of downloads)
+  python -m workstation.smoke_test coder30      # the big MoE test (opt-in)
+  python -m workstation.smoke_test all          # enabled models (skips coder30/cpu05)
 """
 
 from __future__ import annotations
@@ -25,7 +25,14 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("smoke")
 
-SETS = {"fast": ["router", "critic", "coder7"], "all": list(REGISTRY)}
+# "all" excludes:
+#   coder30 — disabled in production (CODER30_ENABLED=False); needs GGUF path
+#   cpu05   — CPU-tier model; loading via GPU worker path is the wrong test
+_ALL_SKIP = frozenset({"coder30", "cpu05"})
+SETS = {
+    "fast": ["router", "critic", "coder7"],
+    "all": [k for k in REGISTRY if k not in _ALL_SKIP],
+}
 
 
 def _header(zoo: ModelZoo) -> None:
@@ -63,34 +70,33 @@ def run_one(zoo: ModelZoo, key: str) -> dict:
     messages = [{"role": "user", "content": "Reply with exactly: OK"}]
     text = tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
     inputs = tok(text=text, return_tensors="pt")
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+    inputs = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in inputs.items()}
 
+    t1 = time.perf_counter()
     with torch.inference_mode():
-        model.generate(**inputs, max_new_tokens=4, do_sample=False)          # warmup
-        t1 = time.perf_counter()
-        out = model.generate(**inputs, max_new_tokens=48, do_sample=False,
-                             pad_token_id=getattr(tok, "pad_token_id", None)
-                             or getattr(tok, "eos_token_id", None))
-        gen_s = time.perf_counter() - t1
+        out = model.generate(**inputs, max_new_tokens=16, do_sample=False)
+    gen_s = time.perf_counter() - t1
+    n_new = int(out.shape[-1] - inputs["input_ids"].shape[-1])
+    tok_s = round(n_new / gen_s, 1) if gen_s > 0 else 0.0
+    reply = _decode(tok, out[0][inputs["input_ids"].shape[-1]:])
 
-    n_new = out.shape[1] - inputs["input_ids"].shape[1]
-    sample = _decode(tok, out[0, -n_new:])[:60]
-
-    # Drop EVERY reference to the model BEFORE unloading. If Python still
-    # holds the weights, they cannot be freed — this exact mistake caused
-    # the false FAILs in the previous run.
-    del out, inputs, model, tok
-
+    # Drop every local reference before unload so CUDA memory can actually free.
+    del model, tok, inputs, out
     zoo.unload_worker()
-    free_after = round(zoo.free_vram_gb(), 2)
+    free_after = zoo.free_vram_gb()
 
     result = {
-        "key": key, "loaded": loaded_key, "fell_back": loaded_key != key,
-        "load_s": load_s, "tok_s": round(n_new / gen_s, 1),
-        "sample": sample, "free_after": free_after,
+        "key": key,
+        "loaded": loaded_key,
+        "fell_back": loaded_key != key,
+        "load_s": load_s,
+        "tok_s": tok_s,
+        "n_new": n_new,
+        "reply": reply.strip()[:80],
+        "free_before": round(free_before, 2),
+        "free_after": round(free_after, 2),
     }
-    # 1.5 GB tolerance: the first load ever pays a one-time ~1 GB CUDA
-    # context cost. That's the floor, not a leak.
+    # 1.5 GB CUDA-context tolerance: residual allocator state is a floor, not a leak.
     result["ok"] = n_new > 0 and free_after >= free_before - 1.5
     log.info("result: %s", result)
     return result
@@ -99,7 +105,7 @@ def run_one(zoo: ModelZoo, key: str) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("targets", nargs="*", default=["fast"],
-                    help="'fast', 'all', or any of: " + ", ".join(REGISTRY))
+                    help="'fast', 'all', or any of: " + ", ".join(sorted(REGISTRY)))
     args = ap.parse_args()
 
     keys: list[str] = []
@@ -119,27 +125,43 @@ def main() -> None:
             err = f"{type(exc).__name__}: {exc}"
             log.error("%s crashed: %s", k, err)
             results.append({"key": k, "ok": False, "error": err})
-        
-        # OUTSIDE the except block: the live traceback keeps a crashed model's 
-        # weights in VRAM; purging here runs only after they're released, 
-        # so one failure can never starve the next test of memory.
-        zoo.purge()   
 
-    # coexistence: only for workers that coexist with the router BY DESIGN.
-    # Heavy workers (vision / coder7 / thinker / coder30) park the router
-    # in production — router + weights do not fit in 7.56 GB.
-    if keys:
-        coex_key = keys[-1]
-        if coex_key in ("router", "critic"):
-            log.info("--- coexistence: resident router + %s ---", coex_key)
+        # OUTSIDE the except block: the live traceback keeps a crashed model's
+        # weights in VRAM; purging here runs only after they're released,
+        # so one failure can never starve the next test of memory.
+        zoo.purge()
+
+    # ------------------------------------------------------------------
+    # Core architecture claim (always, when critic exists in the registry):
+    # router + critic must coexist in VRAM. Previously this only ran when
+    # keys[-1] was router/critic, so the default "fast" set (ending in
+    # coder7) skipped the check entirely — C2 in the v1.0 audit.
+    # ------------------------------------------------------------------
+    if "critic" in REGISTRY and "router" in REGISTRY:
+        log.info("--- coexistence: resident router + critic (core claim) ---")
+        try:
             zoo.load_resident("router")
-            zoo.load_worker(coex_key)
-            log.info("router + %s live together: %.1f GB VRAM still free",
-                     zoo.worker_key, zoo.free_vram_gb())
+            zoo.load_worker("critic")
+            free = zoo.free_vram_gb()
+            log.info("router + critic live together: %.1f GB VRAM still free", free)
             zoo.unload_worker()
-        else:
-            log.info("--- coexistence skipped for '%s': heavy workers park "
-                     "the router in production (by design) ---", coex_key)
+            try:
+                zoo.load_resident("router")  # restore resident if production-like
+            except Exception:
+                log.warning("router re-resident after coexistence failed — lazy reload later")
+            results.append({
+                "key": "coexistence:router+critic",
+                "ok": True,
+                "load_s": 0,
+                "tok_s": 0,
+                "free_after": round(free, 2),
+            })
+        except Exception as exc:                   # noqa: BLE001
+            err = f"{type(exc).__name__}: {exc}"
+            log.error("coexistence failed: %s", err)
+            results.append({"key": "coexistence:router+critic", "ok": False, "error": err})
+        finally:
+            zoo.purge()
 
     zoo.dump_timeline()
 
