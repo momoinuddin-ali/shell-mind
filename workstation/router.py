@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import re
 
-from .model_zoo import get_zoo          # keep this import first in every file
+from .model_zoo import get_zoo, role_key   # keep this import first in every file
 
 SYSTEM = """You are the router of an AI workstation. Classify the request and respond with ONLY a JSON object — no markdown, no extra text:
 {"needs_vision": <true|false>, "task_type": "<code|reasoning|chat|vision_only>"}
@@ -41,13 +41,20 @@ _VALID_TASKS = {"code", "reasoning", "chat", "vision_only"}
 
 # Deterministic safety net: obviously-technical requests never depend on
 # the 1.5B's mood. Extend this list as you find misses in testing.
+# Word-boundary aware where possible so "digit" / "github" do not force code.
+# Trailing space patterns (git /pip ) still match CLI-style tokens.
 _CODE_FORCE = re.compile(
-    r"(one[- ]liner|bash|zsh|shell|regex|script|debug|bug|fix|crash|"
-    r"error|exception|traceback|stack ?trace|segfault|"
+    r"(?i)(?:"
+    r"\bone[- ]liner\b|\bbash\b|\bzsh\b|\bshell\b|\bregex\b|"
+    r"\bscript\b|\bdebug\b|\bbug\b|\bfix\b|\bcrash\b|"
+    r"\berror\b|\bexception\b|\btraceback\b|stack\s?trace|\bsegfault\b|"
     r"(?:Value|Type|Index|Key|Attribute|Name|Import|Module|Runtime|"
     r"ZeroDivision|Assertion|Syntax)Error\b|"
     r"\.py\b|\.js\b|\.ts\b|\.cpp\b|\.rs\b|\.sql\b|"
-    r"docker|kubectl|git |pip |npm |dnf |apt )", re.IGNORECASE)
+    r"\bdocker\b|\bkubectl\b|"
+    r"(?:^|\s)(?:git|pip|npm|dnf|apt)\s"
+    r")"
+)
 
 
 def _generate(model, tok, user_content: str) -> str:
@@ -74,8 +81,12 @@ def _generate(model, tok, user_content: str) -> str:
 
 
 def plan(user_text: str, has_image: bool) -> dict:
-    """Request -> plan dict. Never raises on bad model output."""
-    model, tok = get_zoo().load_resident("router")
+    """Request -> plan dict. Never raises on bad model output.
+
+    user_text must be the raw user prompt only — do not pass
+    RAG/document injection here or _CODE_FORCE can mis-route.
+    """
+    model, tok = get_zoo().load_resident(role_key("router"))
     n_prompt_tokens = len(tok.encode(user_text))
 
     user_content = (f"Image attached: {str(has_image).lower()}\n"
@@ -98,9 +109,11 @@ def plan(user_text: str, has_image: bool) -> dict:
     # Keyword net beats the model vote for obvious cases.
     if task != "vision_only" and _CODE_FORCE.search(user_text):
         task = "code"
-    needs_vision = bool(p.get("needs_vision", False)) and has_image
-    if task == "vision_only" and has_image:
-        needs_vision = True
+    # Hard rule (audit H8): an attached image is always analyzed.
+    # The 1.5B JSON flag is advisory only and must not drop the image.
+    needs_vision = bool(has_image)
+    if task == "vision_only" and not has_image:
+        task = "chat"
     return {
         "needs_vision": needs_vision,
         "task_type": task if task in _VALID_TASKS else "chat",

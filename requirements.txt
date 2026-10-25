@@ -1,0 +1,14 @@
+# Reference environment: RTX 5050 / Blackwell CUDA stack.
+torch==2.13.0
+transformers==5.16.1
+bitsandbytes==0.50.0
+accelerate
+fastapi
+uvicorn
+python-multipart          # required by FastAPI for file uploads
+httpx                     # required by tests/test_server_contract.py
+requests
+pillow
+pypdf
+matplotlib
+huggingface_hub>=0.23
