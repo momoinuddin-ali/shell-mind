@@ -87,7 +87,22 @@ def run_agentic_pipeline(prompt: str, image_path: str | None = None,
             stages.append(("vision", time.perf_counter() - t))
             log.info("Vision summary: %d chars", len(context))
         else:
-            log.warning("vision model not downloaded yet — running text-only")
+            # R2: never silently drop an attached image
+            log.warning("vision model not downloaded — refusing mixed vision request")
+            return {
+                "answer": (
+                    "⚠️ An image was attached but the vision specialist is not in the "
+                    "local model cache, so it was not analyzed.\n\n"
+                    "Preload once on the GPU machine, then retry:\n\n"
+                    "  python -c \"from huggingface_hub import snapshot_download; "
+                    "snapshot_download('Qwen/Qwen3-VL-8B-Instruct')\"\n\n"
+                    "Or remove the image to continue text-only. "
+                    "See README → Model Registry."
+                ),
+                "task": plan.get("task_type", "chat"),
+                "stages": [(s, round(d, 2)) for s, d in stages],
+                "total_s": round(time.perf_counter() - t0, 1),
+            }
 
     # RAG-Lite document text is for workers/critic only — never fed to the router.
     if document_context:

@@ -234,16 +234,37 @@ def _save_upload(file: UploadFile) -> Path:
 
 
 def _validated_upload(path_str: Optional[str]) -> Optional[Path]:
-    """Resolve a client-supplied path to a file this server stored.
+    """Resolve a client-supplied upload token to a file this server stored.
 
-    Anything outside UPLOADS_DIR (or no longer on disk) is rejected —
-    /chat must never become an arbitrary-file-read primitive on the
-    machine running the server.
+    Preferred form: opaque UUID filename returned by /upload* (no directories).
+    Legacy absolute paths under UPLOADS_DIR are still accepted.
+    Paths outside UPLOADS_DIR → 400. Missing file → 404.
     """
     if not path_str:
         return None
-    resolved = Path(path_str).resolve()
-    if paths.UPLOADS_DIR.resolve() not in resolved.parents:
+    s = path_str.strip()
+    uploads_root = paths.UPLOADS_DIR.resolve()
+    norm = s.replace("\\", "/")
+
+    # Directory components or absolute/legacy paths: only legal if under UPLOADS_DIR
+    if norm.startswith("/") or norm.startswith("..") or "/" in norm:
+        try:
+            resolved = Path(s).resolve()
+        except (OSError, RuntimeError):
+            raise HTTPException(
+                400, "path was not issued by this server — "
+                     "upload the file via /upload or /upload_image first")
+        if uploads_root not in resolved.parents:
+            raise HTTPException(
+                400, "path was not issued by this server — "
+                     "upload the file via /upload or /upload_image first")
+        if not resolved.is_file():
+            raise HTTPException(404, "uploaded file is no longer available")
+        return resolved
+
+    # Opaque token (basename only)
+    resolved = (paths.UPLOADS_DIR / Path(norm).name).resolve()
+    if uploads_root not in resolved.parents and resolved.parent != uploads_root:
         raise HTTPException(
             400, "path was not issued by this server — "
                  "upload the file via /upload or /upload_image first")
@@ -360,17 +381,12 @@ _PROTECTED_PATHS = {"/chat", "/upload", "/upload_image"}
 
 # H3: without an API key, lock CORS to local origins so random websites cannot
 # drive the GPU via the browser. With a key set, ["*"] is fine for Tailscale UIs.
+# CORSMiddleware is registered after auth/body middlewares (below) so it runs
+# outermost and answers OPTIONS preflights before API-key checks (R3).
 _cors_origins = (
     ["*"]
     if API_KEY
     else ["http://localhost:8000", "http://127.0.0.1:8000"]
-)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
 )
 
 _UPLOAD_PATHS = {"/upload", "/upload_image"}
@@ -378,27 +394,50 @@ _UPLOAD_BODY_CAP = 26 * 1024 * 1024   # 25 MB file + multipart overhead
 
 @app.middleware("http")
 async def _limit_body_size(request: Request, call_next):
-    cl = request.headers.get("content-length")
-    if cl is not None:
-        try:
-            limit = (
-                _UPLOAD_BODY_CAP
-                if request.url.path in _UPLOAD_PATHS
-                else 1_000_000
-            )
-            if int(cl) > limit:
-                mb = limit // (1024 * 1024)
+    """Path-aware body cap (N1). Closes chunked Transfer-Encoding bypass (R1)."""
+    if request.method in ("POST", "PUT", "PATCH"):
+        path = request.url.path
+        if path in _UPLOAD_PATHS:
+            limit = _UPLOAD_BODY_CAP
+        elif path in _PROTECTED_PATHS:
+            limit = 1_000_000
+        else:
+            limit = None
+        if limit is not None:
+            te = (request.headers.get("transfer-encoding") or "").lower()
+            if "chunked" in te:
+                return JSONResponse(
+                    {"detail": "chunked transfer encoding is not allowed; "
+                               "send Content-Length"},
+                    status_code=411,
+                )
+            cl = request.headers.get("content-length")
+            if cl is None:
+                return JSONResponse(
+                    {"detail": "Content-Length required"},
+                    status_code=411,
+                )
+            try:
+                n = int(cl)
+            except ValueError:
+                return JSONResponse({"detail": "invalid Content-Length"}, status_code=400)
+            if n > limit:
+                mb = max(1, limit // (1024 * 1024))
                 return JSONResponse(
                     {"detail": f"request body too large (max {mb} MB)"},
                     status_code=413,
                 )
-        except ValueError:
-            pass
     return await call_next(request)
+
+
 HAS_GPU = torch.cuda.is_available()
+
 
 @app.middleware("http")
 async def _require_api_key(request: Request, call_next):
+    # R3: CORS preflight never sends X-API-Key
+    if request.method == "OPTIONS":
+        return await call_next(request)
     if API_KEY and request.url.path in _PROTECTED_PATHS:
         supplied = request.headers.get("x-api-key", "")
         if not secrets.compare_digest(supplied, API_KEY):
@@ -407,6 +446,14 @@ async def _require_api_key(request: Request, call_next):
                            "If the key was rotated, update it on this device."},
                 status_code=401)
     return await call_next(request)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ==========================================
 # 5. COPILOT TIERS (lazy-loaded, zero-sum with the agent zoo)
@@ -542,7 +589,7 @@ def upload_image_endpoint(file: UploadFile = File(...),
                           request: Request = None) -> Dict[str, str]:
     client_ip = request.client.host if request and request.client else "unknown"
     rate_stamp = _check_rate_limit(client_ip)
-    return {"image_path": str(_save_upload(file))}
+    return {"image_path": _save_upload(file).name}
 
 
 @app.post("/upload")
@@ -550,7 +597,7 @@ def upload_document_endpoint(file: UploadFile = File(...),
                              request: Request = None) -> Dict[str, str]:
     client_ip = request.client.host if request and request.client else "unknown"
     _check_rate_limit(client_ip)
-    return {"document_path": str(_save_upload(file)),
+    return {"document_path": _save_upload(file).name,
             "status": "stored_for_processing"}
 
 

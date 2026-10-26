@@ -156,8 +156,10 @@ def main() -> None:
     r = client.post("/upload", files={"file": ("notes.txt", b"hello world")})
     check("txt upload -> 200", r.status_code == 200, f"got {r.status_code}")
     doc_path = r.json().get("document_path", "")
-    stored = Path(doc_path)
-    check("stored inside uploads dir", stored.parent == paths.UPLOADS_DIR,
+    # Opaque token: UUID filename only (no absolute server path)
+    stored = paths.UPLOADS_DIR / Path(doc_path).name
+    check("stored inside uploads dir",
+          Path(doc_path).name == doc_path and stored.is_file(),
           doc_path)
     check("stored under UUID name (original name gone)",
           stored.stem.isascii() and stored.suffix == ".txt"
@@ -172,10 +174,13 @@ def main() -> None:
 
     print("upload storage cap:")
     ai_core.UPLOADS_TOTAL_CAP_BYTES = 50
+    prior_upload_names = {f.name for f in paths.UPLOADS_DIR.iterdir()}
     r = client.post("/upload", files={"file": ("fill.txt", b"y" * 200)})
     check("total-storage overflow -> 413",
           r.status_code == 413, f"got {r.status_code}")
-    leftovers = [f for f in paths.UPLOADS_DIR.iterdir() if f.name != stored.name]
+    # Ignore pre-existing files in uploads/; only the overflow attempt must be gone
+    leftovers = [f for f in paths.UPLOADS_DIR.iterdir()
+                 if f.name not in prior_upload_names and f.name != stored.name]
     check("overflowed upload deleted", not leftovers,
           str(leftovers))
     ai_core.UPLOADS_TOTAL_CAP_BYTES = 500 * 1024 * 1024

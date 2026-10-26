@@ -46,8 +46,8 @@ _VALID_TASKS = {"code", "reasoning", "chat", "vision_only"}
 _CODE_FORCE = re.compile(
     r"(?i)(?:"
     r"\bone[- ]liner\b|\bbash\b|\bzsh\b|\bshell\b|\bregex\b|"
-    r"\bscript\b|\bdebug\b|\bbug\b|\bfix\b|\bcrash\b|"
-    r"\berror\b|\bexception\b|\btraceback\b|stack\s?trace|\bsegfault\b|"
+    r"\bscript\b|\bcrash\b|\bsegfault\b|"
+    r"\bexception\b|\btraceback\b|stack\s?trace|"
     r"(?:Value|Type|Index|Key|Attribute|Name|Import|Module|Runtime|"
     r"ZeroDivision|Assertion|Syntax)Error\b|"
     r"\.py\b|\.js\b|\.ts\b|\.cpp\b|\.rs\b|\.sql\b|"

@@ -128,32 +128,42 @@ def load_registry(config_path: Path | None = None
             # or trigger unexpected multi-GB downloads (audit C3).
             if key.startswith("_"):
                 continue
-            spec = raw if isinstance(raw, dict) else {"hf_id": str(raw)}
-            base = registry.get(key)
-            hf_id = str(spec.get("hf_id", base.hf_id if base else key))
-            if not hf_id or "/" not in hf_id:
-                log.warning("models.json: model '%s' has invalid hf_id %r — ignored",
-                            key, hf_id)
+            # R4: one bad entry must not discard the entire overlay
+            try:
+                spec = raw if isinstance(raw, dict) else {"hf_id": str(raw)}
+                base = registry.get(key)
+                hf_id = str(spec.get("hf_id", base.hf_id if base else key))
+                if not hf_id or "/" not in hf_id:
+                    log.warning("models.json: model '%s' has invalid hf_id %r — ignored",
+                                key, hf_id)
+                    continue
+                registry[key] = ModelSpec(
+                    key=key,
+                    hf_id=hf_id,
+                    role=str(spec.get("role", base.role if base else "custom")),
+                    vram_gb=float(spec.get("vram_gb", base.vram_gb if base else 5.0)),
+                    cpu_offload=bool(spec.get("cpu_offload",
+                                              base.cpu_offload if base else False)),
+                    fallback=spec.get("fallback", base.fallback if base else None),
+                    vision=bool(spec.get("vision", base.vision if base else False)),
+                )
+            except Exception as entry_exc:  # noqa: BLE001
+                log.warning("models.json: model '%s' invalid (%s) — ignored",
+                            key, entry_exc)
                 continue
-            registry[key] = ModelSpec(
-                key=key,
-                hf_id=hf_id,
-                role=str(spec.get("role", base.role if base else "custom")),
-                vram_gb=float(spec.get("vram_gb", base.vram_gb if base else 5.0)),
-                cpu_offload=bool(spec.get("cpu_offload",
-                                          base.cpu_offload if base else False)),
-                fallback=spec.get("fallback", base.fallback if base else None),
-                vision=bool(spec.get("vision", base.vision if base else False)),
-            )
         for role, key in (cfg.get("roles") or {}).items():
-            if role not in DEFAULT_ROLES:
-                log.warning("models.json: unknown role '%s' (valid: %s) — ignored",
-                            role, ", ".join(sorted(DEFAULT_ROLES)))
-            elif key in registry:
-                roles[role] = key
-            else:
-                log.warning("models.json: role '%s' points at unknown model "
-                            "key '%s' — ignored", role, key)
+            try:
+                if role not in DEFAULT_ROLES:
+                    log.warning("models.json: unknown role '%s' (valid: %s) — ignored",
+                                role, ", ".join(sorted(DEFAULT_ROLES)))
+                elif key in registry:
+                    roles[role] = key
+                else:
+                    log.warning("models.json: role '%s' points at unknown model "
+                                "key '%s' — ignored", role, key)
+            except Exception as role_exc:  # noqa: BLE001
+                log.warning("models.json: role mapping %r -> %r invalid (%s) — ignored",
+                            role, key, role_exc)
         log.info("models.json loaded from %s — %d models, roles: %s",
                  path, len(registry),
                  {r: roles[r] for r in DEFAULT_ROLES})
