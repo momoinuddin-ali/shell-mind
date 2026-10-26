@@ -1,0 +1,8 @@
+# CI-only deps for tests/test_server_contract.py (GPU stack is stubbed).
+# Full GPU install: pip install -r requirements.txt
+fastapi
+uvicorn
+python-multipart
+httpx
+pypdf
+pillow

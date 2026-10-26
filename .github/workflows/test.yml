@@ -9,7 +9,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -20,13 +20,14 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
+          cache-dependency-path: requirements-ci.txt
 
-      - name: Install dependencies
+      - name: Install CI dependencies (no CUDA/torch)
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements-ci.txt
 
-      - name: Run contract tests (28 checks)
+      - name: Run contract tests
         run: python tests/test_server_contract.py
 
       - name: Verify all Python files parse
@@ -37,7 +38,8 @@ jobs:
           import sys
           bad = []
           for p in pathlib.Path('.').rglob('*.py'):
-              if any(part in ('.venv', 'venv', '__pycache__', 'node_modules', '.git') for part in p.parts):
+              if any(part in ('.venv', 'venv', '__pycache__', 'node_modules', '.git')
+                     for part in p.parts):
                   continue
               try:
                   ast.parse(p.read_text(encoding='utf-8'))
@@ -48,5 +50,5 @@ jobs:
               for line in bad:
                   print(line)
               sys.exit(1)
-          print(" All Python files parse cleanly.")
+          print("All Python files parse cleanly.")
           EOF

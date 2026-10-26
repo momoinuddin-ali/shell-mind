@@ -255,6 +255,76 @@ def main() -> None:
         del os.environ["SHELL_MIND_API_KEY"]
         importlib.reload(ai_core_mod)     # back to open mode
 
+
+    # ------------------------------------------------------------------
+    # Wave B — lock R1 / opaque tokens / path-aware caps against regression
+    # ------------------------------------------------------------------
+    print("wave B (R1 body caps + opaque tokens):")
+
+    # R1: Content-Length over the /chat 1 MB cap → 413
+    r = client.post(
+        "/chat",
+        content=b"x" * (1_000_001),
+        headers={"Content-Type": "application/json", "Content-Length": "1000001"},
+    )
+    check("R1 /chat Content-Length > 1MB -> 413",
+          r.status_code == 413, f"got {r.status_code}")
+
+    # R1: missing Content-Length on POST /chat → 411
+    # Starlette/TestClient always sends Content-Length for content=...; use a
+    # raw ASGI scope-style request via httpx transport is heavy — instead verify
+    # the middleware rejects explicit chunked header when present.
+    r = client.post(
+        "/chat",
+        content=b'{"prompt":"hi","mode":"cpu"}',
+        headers={
+            "Content-Type": "application/json",
+            "Content-Length": str(len(b'{"prompt":"hi","mode":"cpu"}')),
+            "Transfer-Encoding": "chunked",
+        },
+    )
+    # Some stacks strip Transfer-Encoding when Content-Length is set; accept
+    # either 411 (our middleware) or 200/422 (stack ignored TE) — but never 500.
+    check("R1 chunked header does not 500",
+          r.status_code != 500, f"got {r.status_code}")
+    if r.status_code == 411:
+        check("R1 chunked -> 411", True)
+    else:
+        check("R1 chunked handled without crash", r.status_code in (200, 422, 400, 413),
+              f"got {r.status_code}")
+
+    # Opaque token: /etc/passwd style absolute path still 400
+    r = client.post("/chat", json={"prompt": "x", "mode": "cpu",
+                                   "document_path": "/etc/passwd"})
+    check("opaque: absolute path -> 400", r.status_code == 400,
+          f"got {r.status_code}")
+
+    # Opaque token: bare UUID name that does not exist -> 404
+    r = client.post("/chat", json={"prompt": "x", "mode": "cpu",
+                                   "document_path": "deadbeefdeadbeefdeadbeefdeadbeef.txt"})
+    check("opaque: missing token -> 404", r.status_code == 404,
+          f"got {r.status_code}")
+
+    # Upload returns basename only
+    r = client.post("/upload", files={"file": ("waveb.txt", b"wave-b-token")})
+    check("wave B txt upload -> 200", r.status_code == 200, f"got {r.status_code}")
+    token = r.json().get("document_path", "")
+    check("wave B upload returns opaque token",
+          "/" not in token and "\\" not in token and token.endswith(".txt"),
+          token)
+    tok_path = paths.UPLOADS_DIR / token
+    check("wave B token resolves under uploads/", tok_path.is_file(), token)
+
+    # Underscore keys in models.json must not register (C3 / R4-adjacent)
+    from workstation import model_zoo as mz
+    reg, roles = mz.load_registry()
+    check("C3 underscore keys absent from registry",
+          not any(k.startswith("_") for k in reg),
+          str([k for k in reg if k.startswith("_")]))
+
+    tok_path.unlink(missing_ok=True)
+
+
     # cleanup: remove files this test created in uploads/
     stored.unlink(missing_ok=True)
 
