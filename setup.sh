@@ -34,6 +34,7 @@ p.write_text('\n'.join(lines) + '\n')
   else
     printf 'SHELL_MIND_API_KEY=%s\n' "$NEW_KEY" > .env
   fi
+  chmod 0600 .env
   echo
   echo "✅ New API key written to .env"
   echo "   Key: $NEW_KEY"

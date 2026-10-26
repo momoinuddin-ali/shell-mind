@@ -1,0 +1,52 @@
+name: contract-tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run contract tests (28 checks)
+        run: python tests/test_server_contract.py
+
+      - name: Verify all Python files parse
+        run: |
+          python - <<'EOF'
+          import ast
+          import pathlib
+          import sys
+          bad = []
+          for p in pathlib.Path('.').rglob('*.py'):
+              if any(part in ('.venv', 'venv', '__pycache__', 'node_modules', '.git') for part in p.parts):
+                  continue
+              try:
+                  ast.parse(p.read_text(encoding='utf-8'))
+              except SyntaxError as e:
+                  bad.append(f"{p}: {e}")
+          if bad:
+              print("Syntax errors found:")
+              for line in bad:
+                  print(line)
+              sys.exit(1)
+          print(" All Python files parse cleanly.")
+          EOF

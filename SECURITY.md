@@ -12,7 +12,7 @@ your models and stress the GPU within the rate limit.
 They **cannot** (with current hardening):
 
 - read arbitrary files on the server (`/chat` only opens paths the server issued under `uploads/`)
-- execute uploaded files (parsed by PyPDF2 / PIL only)
+- execute uploaded files (parsed by pypdf / PIL only)
 - see other users' chats as a service feature (audit DB is local SQLite on the server disk)
 
 ---

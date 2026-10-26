@@ -57,7 +57,8 @@ On an 8 GB card you cannot keep a 7–8 B model, a vision model, and a critic re
 
 VRAM is measured live around every load (`torch.cuda.mem_get_info()`) and recorded to a timeline. Load failures (OOM, broken quantization path) **purge** VRAM and fall back along a registered chain (`coder30 → coder7`); workers without a registered fallback fail gracefully — the request gets a clean error, VRAM is purged, and the server keeps running.
 
-**The measured price of this contract:** each model swap costs roughly 5–15 s of load time on the RTX 5050, so a full agent run typically takes 1–3 minutes. That is the trade-off that makes a 6-model pipeline fit on an 8 GB card at all — swap latency instead of OOM.
+**The measured price of this contract:** a 7 B model swap costs ~16 s on the RTX 5050, with smaller models (1.5 B router, 4 B critic) loading proportionally faster — so a full agent run typically takes 1–3 minutes. That is the trade-off that makes a 6-model pipeline fit on an 8 GB card at all — swap latency instead of OOM.
+
 
 ![Live VRAM timeline from the RTX 5050](portfolio_vram_chart.png)
 
@@ -407,7 +408,7 @@ Example request:
 2. Set `SHELL_MIND_API_KEY` so even reachable parties need the shared key.
 3. Both, for a two-layer boundary (recommended on shared networks).
 
-Also: path validation prevents `/chat` from reading arbitrary files; uploaded files are parsed only by PyPDF2/PIL and never executed; total upload storage is capped (500 MB) and stale files purge after 24 h; every interaction is logged with the client's address. If a tailnet device (e.g. a phone) is lost, remove it from the [Tailscale admin console](https://login.tailscale.com/admin/machines) — access dies instantly. The audit database stores prompts/responses in plaintext on the server; treat laptop disk access as equivalent to full history access.
+Also: path validation prevents `/chat` from reading arbitrary files; uploaded files are parsed only by pypdf/PIL and never executed; total upload storage is capped (500 MB) and stale files purge after 24 h; every interaction is logged with the client's address. If a tailnet device (e.g. a phone) is lost, remove it from the [Tailscale admin console](https://login.tailscale.com/admin/machines) — access dies instantly. The audit database stores prompts/responses in plaintext on the server; treat laptop disk access as equivalent to full history access.
 
 ---
 
@@ -464,8 +465,7 @@ The contract suite (28 tests, torch/transformers stubbed) locks in the security 
 ## Limitations & Engineering Constraints
 
 Stated honestly, because they shaped the design:
-
-- **Sequential swap latency** — zero-sum orchestration costs 5–15 s per model load; agent runs take minutes, not seconds. No streaming yet (planned).
+- **Sequential swap latency** — a 7 B model load costs ~16 s on the RTX 5050, with smaller models loading proportionally faster; agent runs take minutes, not seconds. No streaming yet (planned).
 - **No streaming** — responses arrive only when generation completes.
 - **No server-side conversation memory** — each request is independent; threads live in the client's `localStorage`.
 - **Single user / single worker** — one GPU owner, one uvicorn worker; requests serialize on a generation lock.

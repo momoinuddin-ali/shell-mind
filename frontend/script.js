@@ -8,10 +8,29 @@
 //      as a local file (each candidate must actually answer /health)
 let SERVER_URL = location.protocol.startsWith("http")
   ? location.origin : "http://localhost:8000";
+// N9: set when a validated ?server= override is active — checkBackend
+// uses this to keep a visible warning in the status bar.
+let serverOverrideActive = false;  
 
 async function detectServer() {
   const override = new URLSearchParams(location.search).get("server");
-  if (override) return override;
+  if (override) {
+    try {
+      const u = new URL(override);
+      if (u.protocol !== "http:" && u.protocol !== "https:") {
+        throw new Error(`invalid scheme '${u.protocol}'`);
+      }
+      serverOverrideActive = true;
+      console.warn("Shell-Mind: ?server= override active →", u.origin);
+      return u.origin;   // normalized — strips path/query/fragment
+    } catch (e) {
+      console.warn(
+        "Shell-Mind: ignoring invalid ?server= override:", override, "—", e.message
+      );
+      // fall through to auto-detection
+    }
+  }
+
 
   const candidates = [];
   if (location.protocol.startsWith("http")) candidates.push(location.origin);
@@ -103,12 +122,15 @@ async function checkBackend() {
       const tier = info.tier ?? '?';
       statusDot.style.background = info.busy ? '#C99B3D' : '#3FB950';
       statusDot.style.boxShadow = `0 0 8px ${info.busy ? '#C99B3D' : '#3FB950'}`;
+      const overrideTag = serverOverrideActive ? ' · OVERRIDE' : '';
       if (narrow) {
-        backendBar.textContent = `${tier}${vram}${auth}${busy}`;
+        backendBar.textContent = `${tier}${vram}${auth}${busy}${overrideTag}`;
       } else {
-        backendBar.textContent = `Connected · ${tier}${vram}${auth}${busy}`;
+        backendBar.textContent = `Connected · ${tier}${vram}${auth}${busy}${overrideTag}`;
       }
-      backendBar.title = `Server: ${SERVER_URL}`;
+      backendBar.title = serverOverrideActive
+        ? `⚠ Override active: ${SERVER_URL} — verify this is your own server`
+        : `Server: ${SERVER_URL}`;
     } else {
       throw new Error('not ok');
     }
@@ -225,7 +247,6 @@ function showTypingIndicator() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-
 function persistThreads() {
   const MAX_THREADS = 30;
   const MAX_MSG_CHARS = 8000;
@@ -245,11 +266,12 @@ function persistThreads() {
         ...t,
         messages: (t.messages || []).map(m => ({
           ...m,
-          content: typeof m.content === 'string' && m.content.length > MAX_MSG_CHARS
-            ? m.content.slice(0, MAX_MSG_CHARS) + '\n…[truncated]'
-            : m.content,
+          text: typeof m.text === 'string' && m.text.length > MAX_MSG_CHARS
+            ? m.text.slice(0, MAX_MSG_CHARS) + '\n…[truncated]'
+            : m.text,
         })),
       }));
+
       allThreads = threads;
       localStorage.setItem('shellMindThreads', JSON.stringify(allThreads));
     } catch (_) {
@@ -257,6 +279,7 @@ function persistThreads() {
     }
   }
 }
+
 
 
 function removeTypingIndicator() {
@@ -292,8 +315,19 @@ async function sendMessage(text) {
 
   try {
     const selectedMode = document.getElementById('modeSelect').value;
+    if (currentImagePath && selectedMode !== 'agent') {
+      removeTypingIndicator();
+      thread.push({
+        role: 'bot',
+        error: true,
+        text: '⚠ Image attachments only work in Agent mode. Switch the mode dropdown to "Agent" and retry, or remove the image to continue text-only.'
+      });
+      renderMessages();
+      sendBtn.disabled = false;
+      persistThreads();
+      return;
+    }
     const payload = { prompt: text, mode: selectedMode };
-
     if (currentImagePath) payload.image_path = currentImagePath;
     if (currentPdfPath) payload.document_path = currentPdfPath;
 
@@ -480,6 +514,18 @@ pdfInput.addEventListener('change', async () => {
     pdfIndicator.style.display = 'none';
   }
 });
+
+const modeSelectEl = document.getElementById('modeSelect');
+const applyModeToAttach = () => {
+  const isAgent = modeSelectEl.value === 'agent';
+  attachBtn.disabled = !isAgent;
+  attachBtn.title = isAgent
+    ? 'Attach an image (agent vision)'
+    : 'Images only work in Agent mode — switch the dropdown';
+  attachBtn.style.opacity = isAgent ? '' : '0.4';
+};
+modeSelectEl.addEventListener('change', applyModeToAttach);
+applyModeToAttach();
 
 renderThreadList();
 renderMessages();

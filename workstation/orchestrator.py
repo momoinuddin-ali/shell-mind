@@ -28,7 +28,27 @@ def run_agentic_pipeline(prompt: str, image_path: str | None = None,
     zoo = get_zoo()
     t0 = time.perf_counter()
     stages: list[tuple[str, float]] = []
+        
+    missing = []
+    if not has_model(role_key("router")):
+        missing.append("router")
+    if not has_model(role_key("critic")):
+        missing.append("critic")
 
+    if missing:
+        return {
+            "answer": (
+                f"⚠️ Agent mode needs these models cached locally: "
+                f"{', '.join(missing)}.\n\n"
+                "Preload them once on this machine, then retry:\n\n"
+                "  python -c \"from huggingface_hub import snapshot_download; "
+                "snapshot_download('<hf_id from models.json / README>')\"\n\n"
+                "See README → Model Registry."
+            ),
+            "task": "preload-required",
+            "stages": [],
+            "total_s": round(time.perf_counter() - t0, 1),
+        }
     # 1) plan (router is resident)
     t = time.perf_counter()
     plan = router.plan(prompt, has_image=bool(image_path))

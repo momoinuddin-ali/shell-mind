@@ -210,7 +210,7 @@ def _save_upload(file: UploadFile) -> Path:
         if suffix == ".pdf":
             if not head.startswith(b"%PDF"):
                 raise HTTPException(415, "file extension is .pdf but content is not a PDF")
-        elif suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+        elif suffix in {".png", ".jpg", ".jpeg", ".gif"}:
             try:
                 from PIL import Image
                 with Image.open(save_path) as im:
@@ -368,25 +368,33 @@ _cors_origins = (
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Reject oversized JSON bodies early (prompt max_length is a second line of defence).
+_UPLOAD_PATHS = {"/upload", "/upload_image"}
+_UPLOAD_BODY_CAP = 26 * 1024 * 1024   # 25 MB file + multipart overhead
+
 @app.middleware("http")
 async def _limit_body_size(request: Request, call_next):
     cl = request.headers.get("content-length")
     if cl is not None:
         try:
-            if int(cl) > 1_000_000:  # 1 MB
-                from fastapi.responses import JSONResponse
-                return JSONResponse({"detail": "request body too large (max 1 MB)"}, status_code=413)
+            limit = (
+                _UPLOAD_BODY_CAP
+                if request.url.path in _UPLOAD_PATHS
+                else 1_000_000
+            )
+            if int(cl) > limit:
+                mb = limit // (1024 * 1024)
+                return JSONResponse(
+                    {"detail": f"request body too large (max {mb} MB)"},
+                    status_code=413,
+                )
         except ValueError:
             pass
     return await call_next(request)
-
-
 HAS_GPU = torch.cuda.is_available()
 
 @app.middleware("http")
@@ -574,7 +582,7 @@ def ask_ai(request: UserRequest, http_request: Request) -> Dict[str, Any]:
         img = _validated_upload(request.image_path)
         if doc is not None:
             suf = doc.suffix.lower()
-            if suf in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            if suf in {".png", ".jpg", ".jpeg",".gif"}:
                 raise HTTPException(
                     400,
                     "Images must be sent via image_path, not document_path",
@@ -636,6 +644,15 @@ def ask_ai(request: UserRequest, http_request: Request) -> Dict[str, Any]:
                     "the required specialists are cached."
                 )
             }
+        if img is not None:
+            return {
+                "answer": (
+                    "⚠️ Image attachments only work in Agent mode. "
+                    "The GPU/CPU copilot tiers cannot read images — they read "
+                    "PDFs and text only. Switch the mode dropdown to 'Agent' "
+                    "and re-send, or remove the attachment to continue text-only."
+                )
+            }    
         _ensure_copilot(request.mode)
         messages = [
             {"role": "system",
