@@ -67,35 +67,51 @@ def see(image_path: str | Path, question: str) -> str:
     from PIL import Image
     zoo = get_zoo()
     zoo.unload_resident()
-    model = proc = img = inputs = out = msgs = None
+    model = proc = img = inputs = out = None
     try:
         model, proc = zoo.load_worker(role_key("vision"))
         img = Image.open(image_path).convert("RGB")
-        img.thumbnail((1408, 1408))
+        # Keep pixels modest so KV + activations fit on 8 GB after weights
+        img.thumbnail((1024, 1024))
+
         msgs = [{"role": "user", "content": [
             {"type": "image", "image": img},
             {"type": "text", "text":
                 f"{_VISION_SYSTEM}\n\nContext question: {question}"},
         ]}]
-        inputs = proc.apply_chat_template(msgs, add_generation_prompt=True,
-                                          return_dict=True)
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+        # Qwen2/3-VL: chat template → text, then processor(text + image)
+        text = proc.apply_chat_template(
+            msgs, tokenize=False, add_generation_prompt=True
+        )
+        inputs = proc(text=[text], images=[img], return_tensors="pt", padding=True)
+        inputs = {
+            k: (v.to(model.device) if hasattr(v, "to") else v)
+            for k, v in inputs.items()
+        }
 
         with torch.inference_mode():
             out = model.generate(**inputs, max_new_tokens=280, do_sample=False)
-        summary = proc.batch_decode(out, skip_special_tokens=True)[0].strip()
 
-        del model, proc, inputs, out, img, msgs
+        # Decode only new tokens when possible
+        trimmed = out
+        if "input_ids" in inputs:
+            trimmed = out[:, inputs["input_ids"].shape[1]:]
+        summary = proc.batch_decode(trimmed, skip_special_tokens=True)[0].strip()
+
+        del model, proc, inputs, out, img
         zoo.unload_worker()
         return summary
     finally:
-        model = proc = img = inputs = out = msgs = None
+        model = proc = img = inputs = out = None
         zoo.unload_worker()
         try:
             zoo.load_resident(role_key("router"))
         except Exception:
-            log.warning("router wake failed after vision stage — "
-                        "it will lazy-reload on the next request")
+            log.warning(
+                "router wake failed after vision stage — "
+                "it will lazy-reload on the next request"
+            )
 
 
 # ----------------------------------------------------------------- coder ---

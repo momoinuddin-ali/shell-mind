@@ -1,106 +1,223 @@
-# Shell-Mind — Changelog & Development Timeline
+# Shell-Mind — Changelog
 
-This file is the single chronological record of how Shell-Mind evolved.
-It merges: the original mini-project build, the October 2026 hardening
-pass (analysis + fixes), the security pass, mobile/Tailscale polish, and
-the models.json customization layer.
+Repo: https://github.com/momoinuddin-ali/shell-mind  
+Hardware target: NVIDIA ~8 GB VRAM (RTX 5050 / 4060 class), fully local.
 
----
+This file is the **product history**. Commit SHAs are from `main` as of 2026-10-26.
+External audit reports (Z AI) are summarized here; the full PDFs are project artifacts, not required in-tree.
 
-## Timeline (straightened)
+## Contributors (git authors on `main`)
 
-| When | What happened |
-|------|----------------|
-| **Sep–early Oct 2026** | Core system built for the 3rd-semester mini-project: Zero-Sum VRAM orchestration, 3-tier engine (CPU / GPU Copilot / Agent), FastAPI server, vanilla UI, CLI, smoke tests, SQLite audit log. Team: Moinuddin, Imtiyaz, Ayaan, Himanshu (SSTC Bhilai). |
-| **~Oct 7** | External code review (Z / GLM session) of the live repo. Found 10 real bugs: cache path outside repo (`parents[2]`), missing root `requirements.txt`, broken CLI remote image, arbitrary file read via `/chat`, eager model load blocking boot, dead unsafe “sandbox”, vision-only hallucination, CLI health mismatch, dual-server GUI confusion, CWD-relative paths. |
-| **Oct 7–8** | Professionalization pass applied on the GPU box: `paths.py`, lazy loading, secure uploads, path validation, backend serves UI, CLI image upload, contract tests, README honesty pass. Left uncommitted initially; then verified live (boot seconds, three agent pipelines 52–115 s, VRAM returns to baseline). |
-| **Oct 9** | Security pass: optional `SHELL_MIND_API_KEY`, upload storage cap, client IP in audit log, Tailscale-only bind documented. Contract suite 20 → 28 tests. |
-| **Oct 10–11** | Docs fixes (`cpu05`, test counts, models.json section). Mobile UI redraw (drawer + backdrop). Rate limiting + busy 503. `setup.sh` key rotation. End-to-end success from Android over Tailscale (`gpu · 0.88G · key`, chat 200). |
-| **Current** | models.json role system is the supported way to customize Hugging Face models. **No GUI model picker** (server-owner config by design for v1). |
+| Name | GitHub | Primary ownership (from commit history) |
+|------|--------|-------------------------------------------|
+| **Mo Moinuddin Ali** | [momoinuddin-ali](https://github.com/momoinuddin-ali) | Engine & product lead: multi-agent / zero-sum VRAM core, `ai_core`, model zoo, orchestrator, agents, router, smoke tests, v1.0–v1.2 architecture, Wave 0–3 audit remediation, contract suite direction, README/SYNOPSIS/SECURITY framing, vision `see()` fix, repo maintenance |
+| **Md Imtiyaz** | [imtiyaz-dev432](https://github.com/imtiyaz-dev432) | Frontend foundation, UI updates, **v1.2.1** residual fixes (N1–N9), GitHub Actions CI, related README touch-ups |
+
+Attribution below follows **who authored the commits** on each milestone. Pair programming / review is assumed inside a milestone but is not invented where git has a single author.
 
 ---
 
-## File-by-file (hardening baseline → current)
+## Timeline (high level)
 
-| File | Role in the system |
-|------|--------------------|
-| `primary_node/ai_core.py` | FastAPI: lazy tiers, secure uploads, API key, rate limit, busy lock, serves frontend |
-| `workstation/paths.py` | **NEW** — all paths anchored to repo root (+ legacy cache fallback) |
-| `workstation/model_zoo.py` | Load/unload, VRAM timeline, `models.json` registry + roles |
-| `workstation/orchestrator.py` | Router → vision → worker → critic; honest vision refusal |
-| `workstation/agents.py` | wake → work → sleep specialists (via `role_key`) |
-| `workstation/router.py` | 1.5B planner → JSON plan |
-| `workstation/smoke_test.py` | Hardware acceptance (load / generate / free VRAM) |
-| `cli.py` | Thin client; uploads images before chat; `--key` |
-| `frontend/*` | Glassmorphism UI, mobile drawer, auth prompt, short status |
-| `tests/test_server_contract.py` | **NEW** — GPU-less API contract suite (~28 tests) |
-| `setup.sh` | Server/client onboarding + **key rotation** |
-| `models.example.json` | Template for custom HF model IDs |
-| `SECURITY.md` | API key threat model and rotation |
-| `vram_chart.py` | Portfolio chart from timeline |
-| `supervisor/safety.py` | **DELETED** (fake sandbox / RCE footgun) |
+| Period | Tag / milestone | Lead author(s) | What landed |
+|--------|-----------------|----------------|-------------|
+| 2026-08-24 → 09-06 | **v1.0** | Mo Moinuddin Ali; frontend seed **Md Imtiyaz** | Multi-agent engine, CLI, VRAM timeline, first release architecture; initial web UI |
+| 2026-09-15 → 09-17 | hygiene | Mo Moinuddin Ali; UI **Md Imtiyaz** | Untrack venv/db/timeline; frontend updates |
+| 2026-09-27 | product merge | Mo Moinuddin Ali | `ai_core` product layer + engine wiring |
+| 2026-10-07 → 10-08 | **v1.1** (`3b62f7f`) | Mo Moinuddin Ali | Hardening: lazy tiers, secure uploads, backend-served UI, anchored paths, contract tests |
+| 2026-10-25 | **v1.2** (`e0cdcdb`, `f526b5c`) | Mo Moinuddin Ali | Wave 0–3 audit remediation; 28/28 contract; smoke PASS on RTX 5050; merge to `main` |
+| 2026-10-26 | **v1.2.1** (`dea677a`…) | **Md Imtiyaz** (fixes + CI); README follow-up | N1–N9 residuals + GitHub Actions CI; path-echo deferred |
+| 2026-10-26 | vision fix + this changelog | Mo Moinuddin Ali | `agents.see()` Qwen3-VL processor path; expanded CHANGES timeline |
 
 ---
 
-## Bugs fixed (the original 10 + follow-ons)
+## v1.0 — Foundation (Aug–early Sep 2026)
 
-1. Model cache written **outside** the repo (`parents[2]`) — fixed + legacy fallback  
-2. README quick start failed (no root `requirements.txt`)  
-3. CLI remote image broken — now uploads via `/upload_image`  
-4. Arbitrary file read via `/chat` — only server-issued upload paths  
-5. Server blocked for minutes at boot — lazy model load  
-6. Dead unsafe `supervisor/safety.py` — deleted  
-7. Vision-only hallucination — refuse if VLM missing  
-8. CLI `/health` field mismatch  
-9. GUI pointed at static server — backend serves UI + health probe  
-10. CWD-relative DB/timeline/uploads — anchored via `paths.py`  
+**Lead:** Mo Moinuddin Ali · **Frontend seed:** Md Imtiyaz (`32f7ebf` add frontend)
 
-**Later:** API key auth, rate limit, busy 503, mobile layout, key rotation in `setup.sh`, models.json documentation.
+**Intent:** Local multi-tier workstation: router + specialists + critic under sequential VRAM pressure.
 
----
+Notable commits:
 
-## Product framing
+- `b8bda68` ready — **Mo Moinuddin Ali**  
+- `32f7ebf` add frontend — **Md Imtiyaz**  
+- `346c4ea` 3 modes (flash / reason-coder / agents) — **Mo Moinuddin Ali**  
+- `5a5eea6` engine green: 3/3 acceptance, cache unified — **Mo Moinuddin Ali**  
+- `14c8963` multi-agent orchestrator, VRAM park, CLI — **Mo Moinuddin Ali**  
+- `25c37c7` pipeline + GUI history + VRAM visualization — **Mo Moinuddin Ali**  
+- `ac4b8a5` / `c67f1f5` finalize v1.0 release architecture — **Mo Moinuddin Ali**  
+- `e5aa49c` harden model cleanup and VRAM reporting — **Mo Moinuddin Ali**  
+- `0eaf036` gitignore runtime artifacts — **Mo Moinuddin Ali**  
 
-Shell-Mind is **not** a hosted service with separate “our servers” and
-“customers.” A user clones the repo and runs the backend themselves. The
-HTTP API + web UI + CLI are how *that same* process is used from localhost
-or from other personal/team devices (often via Tailscale). Zero-sum VRAM
-orchestration is the core claim: a full multi-agent pipeline on an 8 GB
-card; larger hardware uses larger models through `models.json`.
-
-## Customization decision (models)
-
-**What we ship in v1**
-
-- Server owner edits `models.json` (copy from `models.example.json`).
-- Any Hugging Face `hf_id` can fill a pipeline **role**.
-- On first use, weights download into the local HF cache under `models/`.
-- Missing custom models fall back to built-in defaults so chat never hard-crashes.
-- Phone/GUI users **do not** pick models — they only chat. That keeps 8 GB VRAM and multi-GB downloads under the server owner’s control.
-
-**What we deliberately did *not* build yet**
-
-- In-GUI model picker / “paste HF ID and download with progress”
-- Reason: multi-GB downloads inside a chat request are a bad UX and easy to OOM the card.
-
-That GUI remains **future work**, not a missing bug.
+**Known at the time:** ambitious architecture; security and honesty of claims still immature (later audits).
 
 ---
 
-## Verification evidence (live, RTX 5050)
+## v1.1 — Hardening (`3b62f7f`, 2026-10-08)
 
-- Boot in seconds; first model load on demand (~16 s for 7B copilot).  
-- Zero-sum: unload returns free VRAM to within ~0.1 GB of baseline.  
-- Agent pipelines completed in ~1–2 minutes with stage timings.  
-- Android client over Tailscale: auth key, mobile drawer, `POST /chat 200`.  
-- Contract tests run without GPU.
+**Author:** Mo Moinuddin Ali  
+
+**Commit subject:** *hardening pass — lazy tiers, secure uploads, backend-served UI, anchored paths, contract tests*
+
+Themes:
+
+- Lazy model load (server accepts connections before multi-GB weights)
+- Upload whitelist, size caps, server-issued paths only for `/chat`
+- Backend serves `frontend/` (no separate static server)
+- Paths anchored to repo root (`paths.py`)
+- First GPU-less contract test suite
+- README honesty pass (coder30 disabled reason, swap latency, limitations)
+
+This is the first “product layer” that a stranger could clone without immediately shooting themselves in the foot.
+
+Also in this era: README / vram_chart updates (`a6eac34`, `6d36b61`) — **Mo Moinuddin Ali**.
 
 ---
 
-## Known optional follow-ups
+## External audit — v1.0 report → Wave 0–3 (→ v1.2)
 
-- `HF_HUB_OFFLINE=1` after all models are cached (skips HF HEAD noise).  
-- `favicon.ico` (cosmetic 404).  
-- Streaming (SSE/WebSockets).  
-- Optional Settings UI for models.json (future).  
-- GGUF backend for `coder30`.
+**Source:** Z AI *Shell-Mind v1.0 Independent Audit* (37 findings: 3 Critical · 8 High · 13 Medium · 13 Low).  
+**Implementation of Waves 0–3:** Mo Moinuddin Ali (commits `e0cdcdb` / merge `f526b5c`).
+
+### Criticals (all fixed in v1.2)
+
+| ID | Issue | Resolution |
+|----|--------|------------|
+| **C1** | Synopsis claimed concurrent model execution | SYNOPSIS + README: sequential zero-sum; correction table |
+| **C2** | Smoke coexistence check never actually ran | Unconditional router+critic block in `smoke_test.py`; feeds exit code |
+| **C3** | `models.json` underscore keys became real registry entries | `load_registry` skips `_` keys; example file documents convention |
+
+### Highs (closed or partial → residuals in v1.2.1)
+
+| ID | Issue | v1.2 status |
+|----|--------|-------------|
+| H1 | CLI hard-coded port / http-only | Fixed — URL normalize + setup.sh full URL |
+| H2 | `/health` showed config not effective roles | Fixed+ — `roles_effective`, auth-gated telemetry |
+| H3 | CORS `*` with no API key | Fixed — localhost-only when key unset |
+| H4 | Unbounded `/chat` body | Partial — 1 MB middleware (regressed uploads → **N1**) |
+| H5 | localStorage no quota handling | Partial — prune path; trim field bug → **N2** |
+| H6 | Mid-request multi-GB download | Partial — copilot/vision/code guarded; router/critic → **N3** |
+| H7 | PyPDF2 | Fixed in code; prose drift → **N6** |
+| H8 | Image silently dropped | Partial in agent; copilot path → **N4** |
+
+### Wave delivery (v1.2 commit `e0cdcdb` — Mo Moinuddin Ali)
+
+- Wave 0: C2 coexistence, C3 underscore skip  
+- Wave 1: security Highs, pypdf, vision override, OOM guards, CORS  
+- Wave 2: health auth, rate-limit refund, dynamic RAM budget, chart trim, mode labels  
+- Wave 3: mobile/IME/branding polish, CLI Windows/ASCII, security headers, audit rotation  
+
+**Verification (hardware, Mo Moinuddin Ali’s RTX 5050):**
+
+- `python tests/test_server_contract.py` → **28/28**  
+- `python -m workstation.smoke_test` → **PASS** including router+critic coexistence (~2.8 GB free)
+
+---
+
+## v1.2 — Verified workstation (`e0cdcdb` + merge `f526b5c`, 2026-10-25)
+
+**Author:** Mo Moinuddin Ali  
+
+Merge message: *Merge v1.1-professional: Shell-Mind v1.2 as main*
+
+Ship surface:
+
+- Root `requirements.txt`, `setup.sh`, `models.example.json`, `SECURITY.md`, `SYNOPSIS.md`, `LICENSE`
+- No `supervisor/` (unsafe sandbox removed earlier)
+- Contract suite + honest README / security model (optional API key + Tailscale)
+
+---
+
+## External re-audit — v1.2 verification report → v1.2.1
+
+**Source:** Z AI *Shell-Mind v1.2 Patch Verification & Re-Audit*  
+Headline: all 3 Criticals dead; ~84% of original defect budget retired; **1 new High (N1)** + residuals.
+
+### N-findings closed in v1.2.1
+
+**Primary author:** Md Imtiyaz (`dea677a` — *fix various problems and add CI pipeline*; `3c00865` README).  
+**Verification / N1 live 20 MB upload / contract re-run:** Mo Moinuddin Ali (on JARVISfedora).
+
+| ID | Severity | Fix |
+|----|----------|-----|
+| **N1** | High | Path-aware body limit: `/upload*` ≤ 26 MB; `/chat` ≤ 1 MB |
+| **N2** | Medium | `persistThreads` trims `m.text` (not dead `m.content`) |
+| **N3** | Medium | Pre-flight `has_model` for router + critic |
+| **N4** | Medium | Image attach only in Agent mode; honest refusal in copilot |
+| **N5** | Low | `chmod 0600` on key rotation in `setup.sh` |
+| **N6** | Low | Docs PyPDF2 → pypdf |
+| **N7** | Low | Dead `.webp` branches removed |
+| **N8** | Low | `allow_credentials=False` |
+| **N9** | Low | `?server=` validated (http/https only) + OVERRIDE marker |
+| **CI** | — | `.github/workflows/test.yml` — contract suite + AST parse on push/PR |
+
+**Live checks (2026-10-26, Mo Moinuddin Ali):**
+
+- Contract: **28/28**  
+- ~20 MB upload with API key → **415** “not a PDF” (proves N1: body not rejected at 1 MB)
+
+Also: `7181d48` remove accidental empty `.github/a` — **Mo Moinuddin Ali**.
+
+### Deferred to v1.3.0
+
+- **Path echo:** `/upload` still returns absolute server paths — plan opaque UUID tokens.
+
+---
+
+## Vision path fix (2026-10-26, post-tag)
+
+**Author:** Mo Moinuddin Ali  
+
+**Symptom:** Agent + image loaded Qwen3-VL-8B, then crashed:
+
+```text
+AttributeError: 'str' object has no attribute 'items'
+```
+
+in `workstation/agents.py` `see()` — `apply_chat_template(..., return_dict=True)` returned a string on this stack.
+
+**Fix:** template → text, then `processor(text=[...], images=[...], return_tensors="pt")`; modest thumbnail (1024); decode new tokens only when possible.
+
+**Note:** Dense architecture diagrams may still mis-OCR labels under 4-bit 8B VL; structure is usually right. Image attach remains **Agent-mode only** by N4 design (Md Imtiyaz).
+
+---
+
+## Commit index (selected, newest first)
+
+```
+7181d48  Mo Moinuddin Ali   chore: remove accidental empty .github/a
+3c00865  Md Imtiyaz         update readme
+dea677a  Md Imtiyaz         fix various problems and add CI pipeline     ← v1.2.1 body
+f526b5c  Mo Moinuddin Ali   Merge v1.1-professional: Shell-Mind v1.2 as main
+e0cdcdb  Mo Moinuddin Ali   Shell-Mind v1.2: verified zero-sum workstation
+3b62f7f  Mo Moinuddin Ali   v1.1: hardening pass
+eaa55a8  Mo Moinuddin Ali   ai_core product layer + engine
+84df74a  Md Imtiyaz         updated-frontend
+32f7ebf  Md Imtiyaz         add frontend
+ac4b8a5  Mo Moinuddin Ali   feat: finalize Shell-Mind v1.0 release architecture
+25c37c7  Mo Moinuddin Ali   multi-agent pipeline, GUI history, VRAM viz
+14c8963  Mo Moinuddin Ali   orchestrator + VRAM park + CLI
+b8bda68  Mo Moinuddin Ali   ready
+```
+
+Full history:
+
+```bash
+git log --oneline --date=short --pretty=format:'%ad %h %an %s'
+```
+
+---
+
+## How we treat audits
+
+1. **External report** (v1.0 audit, v1.2 re-audit) → findings table with severity.  
+2. **Waves / N-fixes** → code + contract tests (Waves: Mo Moinuddin Ali; N1–N9/CI: Md Imtiyaz).  
+3. **This file** → human-readable bridge between git history and viva/demo narrative.  
+4. Full PDF reports can live outside the repo or under `docs/audits/` if the team wants them versioned.
+
+---
+
+## Next
+
+- **v1.3.0** — opaque upload tokens (path echo)  
+- Optional — smaller VL model for 8 GB headroom; llama.cpp path for 30B coder (documented, not enabled)
