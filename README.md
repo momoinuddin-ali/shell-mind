@@ -1,5 +1,7 @@
 # ⚡ Shell-Mind
 
+[![contract-tests](https://github.com/momoinuddin-ali/shell-mind/actions/workflows/test.yml/badge.svg)](https://github.com/momoinuddin-ali/shell-mind/actions/workflows/test.yml)
+
 **Zero-Sum VRAM Orchestrated Multi-Agent Local AI Workstation**
 
 Shell-Mind is a **self-hosted** multi-tier AI workstation: you clone the repo, run the backend on *your* machine (or a company GPU box), and use the web UI or CLI from that same machine or from other devices you control.
