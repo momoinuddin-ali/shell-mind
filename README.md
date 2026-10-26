@@ -220,7 +220,7 @@ shell-mind/
 │   ├── style.css           # Dark glassmorphism UI
 │   └── script.js           # Threads, attachments, neural loader
 ├── tests/
-│   │   └── test_server_contract.py   # 28 API contract tests — run GPU-less on any machine
+│   │   └── test_server_contract.py   # 37 API contract tests — run GPU-less on any machine
 ├── cli.py                  # Thin terminal client (never loads models)
 ├── vram_chart.py           # Portfolio chart from vram_timeline.json
 ├── requirements.txt
@@ -433,7 +433,7 @@ python vram_chart.py --last 22        # zoom on the last 22 samples
 
 The smoke test asserts that each model can load, generate, unload, and actually free VRAM (within a 1.5 GB CUDA-context tolerance), plus a router+critic coexistence check — the core architecture claim.
 
-The contract suite (28 tests, torch/transformers stubbed) locks in the security and API rules on any laptop in seconds: upload whitelist/cap, path validation (only server-issued paths accepted), status codes (413/415/400/404/422), RAG context injection, and audit-log appends. It catches regressions the stubs can't see — real CUDA/OOM behavior is the smoke test's job on the hardware.
+The contract suite (37 tests, torch/transformers stubbed) locks in the security and API rules on any laptop in seconds: upload whitelist/cap, path validation (only server-issued paths accepted), status codes (413/415/400/404/422), RAG context injection, and audit-log appends. It catches regressions the stubs can't see — real CUDA/OOM behavior is the smoke test's job on the hardware.
 
 ---
 
@@ -496,6 +496,7 @@ Stated honestly, because they shaped the design:
 | Md Imtiyaz           | Backend & Model Zoo           | 61       |
 | Mohammad Ayaan       | Frontend & CLI                | 64       |
 | Himanshu Verma       | Frontend & CLI                | 23       |
+*Note: Commits on the main branch are authored by the Systems Lead and Backend Lead. Frontend/CLI QA, testing, and research contributions by team members were conducted off-repo.*
 
 **Institution:** Shri Shankaracharya Technical Campus, Bhilai
 **Department:** Computer Science & Engineering (AI & ML)
