@@ -114,6 +114,8 @@ All tiers load **lazily on first use** — the server starts serving `/health` w
 | **VRAM timeline** | Pipeline dumps `vram_timeline.json`; `vram_chart.py` produces a portfolio-ready chart |
 | **Decoupled clients** | Vanilla HTML/CSS/JS glassmorphism UI + independent terminal CLI (uploads images itself, works cross-machine) |
 | **Thread history** | Client-side `localStorage` threads; server-side append-only SQLite log for academic review. Requests themselves are stateless — there is no server-side conversation memory (yet) |
+| **Streaming (SSE)** | Copilot modes (`cpu`/`gpu`) stream tokens via `/chat/stream` using Server-Sent Events — first token arrives in ~0.5–1 s instead of waiting for the full reply. Agent mode stays on `/chat` (non-streaming) because the 4-model pipeline needs full drafts between stages |
+
 
 ---
 
@@ -220,7 +222,8 @@ shell-mind/
 │   ├── style.css           # Dark glassmorphism UI
 │   └── script.js           # Threads, attachments, neural loader
 ├── tests/
-│   │   └── test_server_contract.py   # 37 API contract tests — run GPU-less on any machine
+│   │   └── test_server_contract.py   # 43 API contract tests — run GPU-less on any machine
+
 ├── cli.py                  # Thin terminal client (never loads models)
 ├── vram_chart.py           # Portfolio chart from vram_timeline.json
 ├── requirements.txt
@@ -331,6 +334,7 @@ uvicorn primary_node.ai_core:app --host $(tailscale ip -4) --port 8000
 | Contract tests (no GPU) | `python tests/test_server_contract.py` |
 | VRAM chart | `python vram_chart.py` or `python vram_chart.py --last 22` |
 | Health JSON | `curl -s http://127.0.0.1:8000/health` |
+| Streaming chat (SSE) | `curl -N -X POST http://127.0.0.1:8000/chat/stream -H "Content-Type: application/json" -d '{"prompt":"hi","mode":"cpu"}'` |
 
 **Modes (UI dropdown or `--mode`):** `cpu` (0.5B, GPU free) · `gpu` (7B copilot) · `agent` (full pipeline).
 
@@ -364,6 +368,10 @@ SHELL_MIND_DB=/path/to.db       # override audit DB path
 | `POST /chat 200` | Request finished successfully |
 | `POST /chat 401` | Missing or wrong API key |
 | `429` / `503` | Rate limit or server busy — retry shortly |
+| `POST /chat/stream 200` | Streaming request started — SSE frames flowing |
+| `client disconnected mid-stream` | Client dropped SSE connection; worker releases lock when generation completes |
+| `defensive lock release: worker never started` | Rare race hit (early disconnect); safety net released lock — server healthy |
+
 
 ---
 
@@ -386,6 +394,7 @@ Frontend-only edits (`frontend/*`) usually apply after a hard browser refresh (n
 |--------|-------------------|----------------------------------------------|
 | GET    | `/health`         | Status, current tier, GPU flag, free VRAM    |
 | POST   | `/chat`           | Main inference (`mode`: `cpu` / `gpu` / `agent`) |
+| POST   | `/chat/stream`    | SSE streaming variant of `/chat` — copilot modes only (`cpu` / `gpu`); `agent` returns 400 |
 | POST   | `/upload`         | Store a document (PDF/TXT/CSV) for RAG-Lite context |
 | POST   | `/upload_image`   | Store an image for the vision specialist     |
 
@@ -433,7 +442,7 @@ python vram_chart.py --last 22        # zoom on the last 22 samples
 
 The smoke test asserts that each model can load, generate, unload, and actually free VRAM (within a 1.5 GB CUDA-context tolerance), plus a router+critic coexistence check — the core architecture claim.
 
-The contract suite (37 tests, torch/transformers stubbed) locks in the security and API rules on any laptop in seconds: upload whitelist/cap, path validation (only server-issued paths accepted), status codes (413/415/400/404/422), RAG context injection, and audit-log appends. It catches regressions the stubs can't see — real CUDA/OOM behavior is the smoke test's job on the hardware.
+The contract suite (43 tests, torch/transformers stubbed) locks in the security and API rules on any laptop in seconds: upload whitelist/cap, path validation (only server-issued paths accepted), status codes (413/415/400/404/422), RAG context injection, and audit-log appends. It catches regressions the stubs can't see — real CUDA/OOM behavior is the smoke test's job on the hardware.
 
 ---
 
@@ -467,8 +476,8 @@ The contract suite (37 tests, torch/transformers stubbed) locks in the security 
 ## Limitations & Engineering Constraints
 
 Stated honestly, because they shaped the design:
-- **Sequential swap latency** — a 7 B model load costs ~16 s on the RTX 5050, with smaller models loading proportionally faster; agent runs take minutes, not seconds. No streaming yet (planned).
-- **No streaming** — responses arrive only when generation completes.
+- **Sequential swap latency** — a 7 B model load costs ~16 s on the RTX 5050, with smaller models loading proportionally faster; agent runs take minutes, not seconds. 
+- **Streaming tradeoffs** — SSE is implemented for copilot modes only. Three known limitations, all documented for v2.0: (1) per-token event-loop yield adds ~50–100 ms latency to other requests during active streams; (2) client disconnect does not abort generation — the worker completes its bounded token budget before releasing the lock; (3) user prompts are not yet sanitized for chat-template control tokens.
 - **No server-side conversation memory** — each request is independent; threads live in the client's `localStorage`.
 - **Single user / single worker** — one GPU owner, one uvicorn worker; requests serialize on a generation lock.
 - **Shared-key auth, not per-user** — `SHELL_MIND_API_KEY` gates *access*; the audit log attributes clients by IP, not by identity.
@@ -480,7 +489,6 @@ Stated honestly, because they shaped the design:
 ## Future Work
 
 - [ ] GGUF / llama.cpp backend for true CPU offload of MoE experts (unlocks `coder30`)
-- [ ] Streaming responses via WebSockets or Server-Sent Events
 - [ ] Full vector RAG (Chroma / FAISS) for larger document collections
 - [ ] Server-side conversation memory across turns and sessions
 - [ ] Function-calling / web-search tool agents
