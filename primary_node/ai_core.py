@@ -19,7 +19,7 @@ for the web UI (the API server serves the frontend itself):
 """
 
 from __future__ import annotations
-
+import json 
 import gc
 import logging
 import hmac
@@ -36,6 +36,7 @@ from typing import Any, Dict, Literal, Optional
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -56,6 +57,7 @@ from transformers import (                                 # noqa: E402
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
+    TextIteratorStreamer,
 )
 
 logging.basicConfig(level=logging.INFO,
@@ -600,7 +602,107 @@ def upload_document_endpoint(file: UploadFile = File(...),
     return {"document_path": _save_upload(file).name,
             "status": "stored_for_processing"}
 
+@app.post("/chat/stream")
+async def ask_ai_stream(request: UserRequest, http_request: Request):
+    """SSE streaming variant of /chat — copilot modes only."""
+    client_ip = http_request.client.host if http_request.client else "unknown"
+    rate_stamp = _check_rate_limit(client_ip)
 
+    if request.mode == "agent":
+        _rollback_rate_hit(client_ip, rate_stamp)
+        raise HTTPException(
+            status_code=400,
+            detail="Streaming not supported in agent mode — use /chat",
+        )
+
+    if not GEN_LOCK.acquire(blocking=False):
+        waited = (time.monotonic() - _busy_since["t"]
+                  if _busy_since["t"] else 0)
+        _rollback_rate_hit(client_ip, rate_stamp)
+        raise HTTPException(
+            status_code=503,
+            detail=f"server busy (running ~{int(waited)}s). Retry shortly.",
+            headers={"Retry-After": "60"},
+        )
+
+    _busy_since["t"] = time.monotonic()
+    try:
+        doc = _validated_upload(request.document_path)
+        img = _validated_upload(request.image_path)
+        if doc is not None:
+            suf = doc.suffix.lower()
+            if suf in {".png", ".jpg", ".jpeg", ".gif"}:
+                raise HTTPException(400, "Images must go via image_path")
+            if suf not in {".pdf", ".txt", ".csv"}:
+                raise HTTPException(400, "document_path only accepts .pdf/.txt/.csv")
+        if img is not None:
+            raise HTTPException(400, "Images only work in agent mode")
+
+        file_logged = doc.name if doc else "None"
+        doc_context = _document_context(doc)
+        final_prompt = request.prompt + doc_context
+
+        copilot_role = "copilot_gpu" if request.mode == "gpu" else "copilot_cpu"
+        if not has_model(role_key(copilot_role)):
+            raise HTTPException(503, f"{request.mode} copilot not cached")
+
+        _ensure_copilot(request.mode)
+
+        messages = [
+            {"role": "system", "content": "You are a highly capable coding assistant."},
+            {"role": "user", "content": final_prompt},
+        ]
+        formatted_prompt = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True)
+        inputs = tokenizer(formatted_prompt, return_tensors="pt").to(model.device)
+
+        streamer = TextIteratorStreamer(
+            tokenizer, skip_prompt=True, skip_special_tokens=True)
+
+        def _run_generation():
+            try:
+                with torch.inference_mode():
+                    model.generate(
+                        **inputs,
+                        max_new_tokens=1500,
+                        do_sample=True,
+                        temperature=0.6,
+                        pad_token_id=tokenizer.eos_token_id,
+                        streamer=streamer,
+                    )
+            except Exception:
+                log.exception("streaming generation failed")
+
+        async def event_generator():
+            accumulated: list[str] = []
+            try:
+                thread = threading.Thread(target=_run_generation, daemon=True)
+                thread.start()
+                for token in streamer:
+                    accumulated.append(token)
+                    yield f"data: {json.dumps({'token': token})}\n\n"
+                full_reply = "".join(accumulated).strip()
+                log_to_db(request.mode.upper(), request.prompt, full_reply,
+                          file_logged, client=client_ip)
+                yield f"data: {json.dumps({'done': True, 'answer': full_reply})}\n\n"
+            except GeneratorExit:
+                log.info("client disconnected mid-stream")
+                raise
+            finally:
+                _busy_since["t"] = None
+                GEN_LOCK.release()
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+    except HTTPException:
+        _busy_since["t"] = None
+        GEN_LOCK.release()
+        raise  
+    except Exception:
+        _busy_since["t"] = None
+        GEN_LOCK.release()
+        raise
+   
 @app.post("/chat")
 def ask_ai(request: UserRequest, http_request: Request) -> Dict[str, Any]:
     client_ip = http_request.client.host if http_request.client else "unknown"

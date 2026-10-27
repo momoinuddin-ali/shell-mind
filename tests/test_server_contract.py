@@ -68,6 +68,18 @@ class FakeModel:
 
     def generate(self, **kwargs):
         return [list(range(20))]
+class FakeTextIteratorStreamer:
+    """Minimal stub for transformers.TextIteratorStreamer.
+
+    Yields a fixed token list so SSE streaming can be exercised under
+    GPU-less tests without a real model/streamer.
+    """
+    def __init__(self, tokenizer, skip_prompt=False, skip_special_tokens=False, **kwargs):
+        self._tokens = ["stub ", "reply"]
+
+    def __iter__(self):
+        for t in self._tokens:
+            yield t
 
 
 def _install_stubs() -> None:
@@ -105,6 +117,7 @@ def _install_stubs() -> None:
     tf_stub.AutoProcessor = _FromPretrained(FakeTokenizer)
     tf_stub.BitsAndBytesConfig = _Dummy
     sys.modules["transformers"] = tf_stub
+    tf_stub.TextIteratorStreamer = FakeTextIteratorStreamer
 
 
 _install_stubs()
@@ -197,6 +210,25 @@ def main() -> None:
 
     r = client.post("/chat", json={"prompt": "hi", "mode": "turbo"})
     check("invalid mode -> 422", r.status_code == 422, f"got {r.status_code}")
+    print("streaming endpoint:")
+    r = client.post("/chat/stream", json={"prompt": "hi", "mode": "agent"})
+    check("agent mode rejected on /chat/stream -> 400",
+          r.status_code == 400, f"got {r.status_code}")
+
+    r = client.post("/chat/stream", json={"prompt": "hi", "mode": "turbo"})
+    check("invalid mode on /chat/stream -> 422",
+          r.status_code == 422, f"got {r.status_code}")
+
+    r = client.post("/chat/stream", json={"prompt": "hi", "mode": "cpu"})
+    check("/chat/stream happy path -> 200",
+          r.status_code == 200, f"got {r.status_code}: {r.text[:120]}")
+    check("/chat/stream content-type is SSE",
+          r.headers.get("content-type", "").startswith("text/event-stream"),
+          r.headers.get("content-type", ""))
+    check("/chat/stream emits SSE data frames",
+          "data: " in r.text, r.text[:120])
+    check("/chat/stream ends with done marker",
+          '"done"' in r.text, r.text[-200:])
 
     print("chat end-to-end (stubbed model):")
     import sqlite3

@@ -287,6 +287,68 @@ function removeTypingIndicator() {
   if (el) el.remove();
 }
 
+// SSE streaming for copilot modes — tokens arrive incrementally.
+// Returns true on success, false if stream unavailable (caller falls back to /chat).
+async function sendMessageStream(text, payload, thread) {
+  const res = await serverFetch('/chat/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok || !res.body) return false;
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const botMsg = { role: 'bot', text: '' };
+  thread.push(botMsg);
+  removeTypingIndicator();
+  renderMessages();
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split('\n\n');
+      buffer = blocks.pop();
+      for (const block of blocks) {
+        const line = block.trim();
+        if (!line.startsWith('data: ')) continue;
+        let parsed;
+        try { parsed = JSON.parse(line.slice(6)); } catch { continue; }
+        if (parsed.token) {
+          botMsg.text += parsed.token;
+          renderMessages();
+        } else if (parsed.done && parsed.answer) {
+          botMsg.text = parsed.answer;
+        }
+      }
+    }
+
+    if (!botMsg.text.trim()) throw new Error('empty stream');
+
+    statusDot.style.background = '#3FB950';
+    statusDot.style.boxShadow = '0 0 8px #3FB950';
+    currentImagePath = null;
+    currentPdfPath = null;
+    imageIndicator.style.display = 'none';
+    pdfIndicator.style.display = 'none';
+    visionInput.value = '';
+    pdfInput.value = '';
+    return true;
+  } catch (err) {
+    if (!botMsg.text.trim()) {
+      const i = thread.indexOf(botMsg);
+      if (i >= 0) thread.splice(i, 1);
+    }
+    throw err;
+  }
+}
+
+
+
 async function sendMessage(text) {
   if (!text || !text.trim()) return;
   if (sendBtn.disabled) return;
@@ -327,34 +389,45 @@ async function sendMessage(text) {
       persistThreads();
       return;
     }
-    const payload = { prompt: text, mode: selectedMode };
+        const payload = { prompt: text, mode: selectedMode };
     if (currentImagePath) payload.image_path = currentImagePath;
     if (currentPdfPath) payload.document_path = currentPdfPath;
 
-    const res = await serverFetch('/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-
-    removeTypingIndicator();
-    if (!res.ok) {
-      const detail = await res.json().catch(() => ({}));
-      throw new Error(friendlyError(res.status, detail.detail));
+    let streamed = false;
+    if (selectedMode !== 'agent') {
+      try {
+        streamed = await sendMessageStream(text, payload, thread);
+      } catch (streamErr) {
+        console.warn('stream failed, falling back to /chat:', streamErr);
+      }
     }
 
-    const data = await res.json();
-    thread.push({ role: 'bot', text: data.answer });
+    if (!streamed) {
+      const res = await serverFetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
 
-    statusDot.style.background = '#3FB950';
-    statusDot.style.boxShadow = '0 0 8px #3FB950';
+      removeTypingIndicator();
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(friendlyError(res.status, detail.detail));
+      }
 
-    currentImagePath = null;
-    currentPdfPath = null;
-    imageIndicator.style.display = 'none';
-    pdfIndicator.style.display = 'none';
-    visionInput.value = "";
-    pdfInput.value = "";
+      const data = await res.json();
+      thread.push({ role: 'bot', text: data.answer });
+
+      statusDot.style.background = '#3FB950';
+      statusDot.style.boxShadow = '0 0 8px #3FB950';
+
+      currentImagePath = null;
+      currentPdfPath = null;
+      imageIndicator.style.display = 'none';
+      pdfIndicator.style.display = 'none';
+      visionInput.value = "";
+      pdfInput.value = "";
+    }
 
   } catch (err) {
     removeTypingIndicator();
