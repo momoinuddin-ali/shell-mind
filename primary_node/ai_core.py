@@ -20,6 +20,7 @@ for the web UI (the API server serves the frontend itself):
 
 from __future__ import annotations
 import json 
+import anyio
 import gc
 import logging
 import hmac
@@ -39,6 +40,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 
 from workstation import paths
@@ -68,22 +70,22 @@ log = logging.getLogger("shell-mind.server")
 # ==========================================
 # 1. AUDIT LOG (append-only SQLite)
 # ==========================================
+
 def init_db() -> None:
     conn = sqlite3.connect(paths.DB_PATH)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("""CREATE TABLE IF NOT EXISTS interactions
-                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     timestamp TEXT,
-                     compute_mode TEXT,
-                     prompt TEXT,
-                     response TEXT,
-                     attached_file TEXT)""")
     try:
-        conn.execute("ALTER TABLE interactions ADD COLUMN client TEXT DEFAULT 'unknown'")
-    except sqlite3.OperationalError:
-        pass        # column already exists
-    conn.commit()
-    conn.close()
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("""CREATE TABLE IF NOT EXISTS interactions
+                        (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                         timestamp TEXT, compute_mode TEXT, prompt TEXT,
+                         response TEXT, attached_file TEXT)""")
+        try:
+            conn.execute("ALTER TABLE interactions ADD COLUMN client TEXT DEFAULT 'unknown'")
+        except sqlite3.OperationalError:
+            pass
+        conn.commit()
+    finally:
+        conn.close()
     log.info("audit log ready at %s", paths.DB_PATH)
 
 
@@ -105,29 +107,29 @@ def _rotate_audit_db_if_needed() -> None:
     except OSError as exc:
         log.warning("audit rotation skipped: %s", exc)
 
-
 def log_to_db(mode: str, prompt: str, response: str,
               attached_file: str = "None", client: str = "unknown") -> None:
     _rotate_audit_db_if_needed()
     conn = sqlite3.connect(paths.DB_PATH)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    # Re-create schema if we just rotated the file away
-    conn.execute("""CREATE TABLE IF NOT EXISTS interactions
-                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     timestamp TEXT,
-                     compute_mode TEXT,
-                     prompt TEXT,
-                     response TEXT,
-                     attached_file TEXT,
-                     client TEXT DEFAULT 'unknown')""")
-    conn.execute(
-        "INSERT INTO interactions (timestamp, compute_mode, prompt, response, attached_file, client) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), mode, prompt,
-         response, attached_file, client),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("""CREATE TABLE IF NOT EXISTS interactions
+                        (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                         timestamp TEXT,
+                         compute_mode TEXT,
+                         prompt TEXT,
+                         response TEXT,
+                         attached_file TEXT,
+                         client TEXT DEFAULT 'unknown')""")
+        conn.execute(
+            "INSERT INTO interactions (timestamp, compute_mode, prompt, response, attached_file, client) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), mode, prompt,
+             response, attached_file, client),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 init_db()
@@ -379,7 +381,7 @@ app = FastAPI(title="Shell-Mind")
 # secondary valid key. Clients that still hold the old key get 401 until
 # they enter the new one.
 API_KEY = os.environ.get("SHELL_MIND_API_KEY")
-_PROTECTED_PATHS = {"/chat", "/upload", "/upload_image"}
+_PROTECTED_PATHS = {"/chat", "/upload", "/upload_image","/chat/stream"}
 
 # H3: without an API key, lock CORS to local origins so random websites cannot
 # drive the GPU via the browser. With a key set, ["*"] is fine for Tailscale UIs.
@@ -474,6 +476,9 @@ _tier: Dict[str, str] = {"current": "cpu" if not HAS_GPU else "copilot-idle"}
 
 GEN_LOCK = threading.Lock()
 _busy_since: Dict[str, Optional[float]] = {"t": None}   # for queue feedback
+_gen_owner: Dict[str, Optional[str]] = {"token": None}
+_gen_worker_started: Dict[str, bool] = {"started": False}
+
 
 
 def _note_zoo(event: str) -> None:
@@ -604,7 +609,16 @@ def upload_document_endpoint(file: UploadFile = File(...),
 
 @app.post("/chat/stream")
 async def ask_ai_stream(request: UserRequest, http_request: Request):
-    """SSE streaming variant of /chat — copilot modes only."""
+    """SSE streaming variant of /chat — copilot modes only.
+
+    Fixes applied (v1.3.1):
+      * F1 — auth: /chat/stream added to _PROTECTED_PATHS
+      * F2 — disconnect/VRAM race: GEN_LOCK released by worker thread, not
+              by the generator, so an eviction cannot run while generation
+              is still alive
+      * F3 — deadlock: streamer.end() guaranteed in worker finally so a
+              crashed generate() cannot park the main thread forever
+    """
     client_ip = http_request.client.host if http_request.client else "unknown"
     rate_stamp = _check_rate_limit(client_ip)
 
@@ -624,7 +638,9 @@ async def ask_ai_stream(request: UserRequest, http_request: Request):
             detail=f"server busy (running ~{int(waited)}s). Retry shortly.",
             headers={"Retry-After": "60"},
         )
-
+    my_token = uuid.uuid4().hex
+    _gen_owner["token"] = my_token
+    _gen_worker_started["started"] = False 
     _busy_since["t"] = time.monotonic()
     try:
         doc = _validated_upload(request.document_path)
@@ -646,7 +662,8 @@ async def ask_ai_stream(request: UserRequest, http_request: Request):
         if not has_model(role_key(copilot_role)):
             raise HTTPException(503, f"{request.mode} copilot not cached")
 
-        _ensure_copilot(request.mode)
+        await anyio.to_thread.run_sync(_ensure_copilot, request.mode)
+
 
         messages = [
             {"role": "system", "content": "You are a highly capable coding assistant."},
@@ -657,8 +674,7 @@ async def ask_ai_stream(request: UserRequest, http_request: Request):
         inputs = tokenizer(formatted_prompt, return_tensors="pt").to(model.device)
 
         streamer = TextIteratorStreamer(
-            tokenizer, skip_prompt=True, skip_special_tokens=True)
-
+            tokenizer, skip_prompt=True, skip_special_tokens=True,timeout=300,)
         def _run_generation():
             try:
                 with torch.inference_mode():
@@ -672,12 +688,25 @@ async def ask_ai_stream(request: UserRequest, http_request: Request):
                     )
             except Exception:
                 log.exception("streaming generation failed")
+            finally:
+                # F3: ensure the main thread is never stuck on queue.get()
+                try:
+                    streamer.end()
+                except Exception:
+                    pass
+                # F2: release the lock only after the worker is truly idle
+                _busy_since["t"] = None
+                _gen_owner["token"] = None
+                _gen_worker_started["started"] = False
+
+                GEN_LOCK.release()
 
         async def event_generator():
             accumulated: list[str] = []
             try:
                 thread = threading.Thread(target=_run_generation, daemon=True)
                 thread.start()
+                _gen_worker_started["started"] = True   
                 for token in streamer:
                     accumulated.append(token)
                     yield f"data: {json.dumps({'token': token})}\n\n"
@@ -686,23 +715,50 @@ async def ask_ai_stream(request: UserRequest, http_request: Request):
                           file_logged, client=client_ip)
                 yield f"data: {json.dumps({'done': True, 'answer': full_reply})}\n\n"
             except GeneratorExit:
-                log.info("client disconnected mid-stream")
+                
+                log.info("client disconnected mid-stream; worker will "
+                         "release GEN_LOCK when generation completes")
                 raise
-            finally:
-                _busy_since["t"] = None
-                GEN_LOCK.release()
+            
 
-        return StreamingResponse(event_generator(), media_type="text/event-stream")
+        async def _defensive_cleanup():
+            """Fix 2 safety net — release lock if the worker thread never
+            started (client disconnected between lock acquire and first
+            token, so the generator's finally never ran)."""
+            if _gen_owner["token"] == my_token and not _gen_worker_started["started"]:
+                try:
+                    _busy_since["t"] = None
+                    _gen_owner["token"] = None
+                    GEN_LOCK.release()
+                    log.warning("defensive lock release: worker never started "
+                                "(client disconnected before first token)")
+                except RuntimeError:
+                    pass  # already released somehow
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            background=BackgroundTask(_defensive_cleanup),
+        )
+
 
     except HTTPException:
+        # Pre-stream validation failed before the worker thread was started.
         _busy_since["t"] = None
-        GEN_LOCK.release()
-        raise  
+        if _gen_owner["token"] == my_token:
+            _gen_owner["token"] = None
+            _gen_worker_started["started"] = False
+            GEN_LOCK.release()
+        raise
     except Exception:
         _busy_since["t"] = None
-        GEN_LOCK.release()
+        if _gen_owner["token"] == my_token:
+            _gen_owner["token"] = None
+            _gen_worker_started["started"] = False
+            GEN_LOCK.release()
         raise
-   
+
+
 @app.post("/chat")
 def ask_ai(request: UserRequest, http_request: Request) -> Dict[str, Any]:
     client_ip = http_request.client.host if http_request.client else "unknown"
