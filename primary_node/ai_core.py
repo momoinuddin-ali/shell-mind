@@ -477,7 +477,6 @@ _tier: Dict[str, str] = {"current": "cpu" if not HAS_GPU else "copilot-idle"}
 GEN_LOCK = threading.Lock()
 _busy_since: Dict[str, Optional[float]] = {"t": None}   # for queue feedback
 _gen_owner: Dict[str, Optional[str]] = {"token": None}
-_gen_worker_started: Dict[str, bool] = {"started": False}
 
 
 
@@ -611,13 +610,16 @@ def upload_document_endpoint(file: UploadFile = File(...),
 async def ask_ai_stream(request: UserRequest, http_request: Request):
     """SSE streaming variant of /chat — copilot modes only.
 
-    Fixes applied (v1.3.1):
-      * F1 — auth: /chat/stream added to _PROTECTED_PATHS
-      * F2 — disconnect/VRAM race: GEN_LOCK released by worker thread, not
-              by the generator, so an eviction cannot run while generation
-              is still alive
-      * F3 — deadlock: streamer.end() guaranteed in worker finally so a
-              crashed generate() cannot park the main thread forever
+    Lock protocol (single releaser — no dual GEN_LOCK.release):
+      * Handler acquires GEN_LOCK.
+      * Until the worker thread is *dispatched*, the async handler owns
+        release (HTTPException / setup failure / defensive cleanup).
+      * After ``worker_dispatched = True`` (set synchronously *before*
+        ``thread.start()``), **only** the worker's ``finally`` may release.
+      * ``_release_once`` is idempotent under a local lock so defensive
+        cleanup and worker finally can never both unlock the global lock.
+      * ``streamer.end()`` always runs in the worker finally so the
+        iterator cannot block forever on queue.get().
     """
     client_ip = http_request.client.host if http_request.client else "unknown"
     rate_stamp = _check_rate_limit(client_ip)
@@ -638,10 +640,33 @@ async def ask_ai_stream(request: UserRequest, http_request: Request):
             detail=f"server busy (running ~{int(waited)}s). Retry shortly.",
             headers={"Retry-After": "60"},
         )
+
     my_token = uuid.uuid4().hex
     _gen_owner["token"] = my_token
-    _gen_worker_started["started"] = False 
     _busy_since["t"] = time.monotonic()
+
+    # Request-local release state — never release GEN_LOCK twice.
+    _release_guard = threading.Lock()
+    _released = False
+    worker_dispatched = False
+
+    def _release_once(reason: str = "") -> None:
+        nonlocal _released
+        with _release_guard:
+            if _released:
+                return
+            _released = True
+        _busy_since["t"] = None
+        if _gen_owner.get("token") == my_token:
+            _gen_owner["token"] = None
+        try:
+            GEN_LOCK.release()
+        except RuntimeError:
+            log.warning("GEN_LOCK release race ignored (%s)", reason)
+        else:
+            if reason:
+                log.debug("GEN_LOCK released (%s)", reason)
+
     try:
         doc = _validated_upload(request.document_path)
         img = _validated_upload(request.image_path)
@@ -662,8 +687,8 @@ async def ask_ai_stream(request: UserRequest, http_request: Request):
         if not has_model(role_key(copilot_role)):
             raise HTTPException(503, f"{request.mode} copilot not cached")
 
+        # Keep the event loop responsive while weights load / swap.
         await anyio.to_thread.run_sync(_ensure_copilot, request.mode)
-
 
         messages = [
             {"role": "system", "content": "You are a highly capable coding assistant."},
@@ -674,8 +699,10 @@ async def ask_ai_stream(request: UserRequest, http_request: Request):
         inputs = tokenizer(formatted_prompt, return_tensors="pt").to(model.device)
 
         streamer = TextIteratorStreamer(
-            tokenizer, skip_prompt=True, skip_special_tokens=True,timeout=300,)
-        def _run_generation():
+            tokenizer, skip_prompt=True, skip_special_tokens=True, timeout=300,
+        )
+
+        def _run_generation() -> None:
             try:
                 with torch.inference_mode():
                     model.generate(
@@ -689,24 +716,23 @@ async def ask_ai_stream(request: UserRequest, http_request: Request):
             except Exception:
                 log.exception("streaming generation failed")
             finally:
-                # F3: ensure the main thread is never stuck on queue.get()
                 try:
                     streamer.end()
                 except Exception:
                     pass
-                # F2: release the lock only after the worker is truly idle
-                _busy_since["t"] = None
-                _gen_owner["token"] = None
-                _gen_worker_started["started"] = False
-
-                GEN_LOCK.release()
+                # Sole releaser after dispatch.
+                _release_once("worker-finally")
 
         async def event_generator():
+            nonlocal worker_dispatched
             accumulated: list[str] = []
             try:
                 thread = threading.Thread(target=_run_generation, daemon=True)
+                # Commit *before* start(): from this point only the worker
+                # may release GEN_LOCK. Eliminates dual-release race with
+                # BackgroundTask defensive cleanup.
+                worker_dispatched = True
                 thread.start()
-                _gen_worker_started["started"] = True   
                 for token in streamer:
                     accumulated.append(token)
                     yield f"data: {json.dumps({'token': token})}\n\n"
@@ -715,25 +741,24 @@ async def ask_ai_stream(request: UserRequest, http_request: Request):
                           file_logged, client=client_ip)
                 yield f"data: {json.dumps({'done': True, 'answer': full_reply})}\n\n"
             except GeneratorExit:
-                
-                log.info("client disconnected mid-stream; worker will "
-                         "release GEN_LOCK when generation completes")
+                log.info(
+                    "client disconnected mid-stream; worker will "
+                    "release GEN_LOCK when generation completes"
+                )
                 raise
-            
 
-        async def _defensive_cleanup():
-            """Fix 2 safety net — release lock if the worker thread never
-            started (client disconnected between lock acquire and first
-            token, so the generator's finally never ran)."""
-            if _gen_owner["token"] == my_token and not _gen_worker_started["started"]:
-                try:
-                    _busy_since["t"] = None
-                    _gen_owner["token"] = None
-                    GEN_LOCK.release()
-                    log.warning("defensive lock release: worker never started "
-                                "(client disconnected before first token)")
-                except RuntimeError:
-                    pass  # already released somehow
+        async def _defensive_cleanup() -> None:
+            """Release only if the worker was never dispatched.
+
+            After worker_dispatched=True the worker finally is the sole
+            releaser — do not touch GEN_LOCK here.
+            """
+            if not worker_dispatched:
+                _release_once("defensive-never-dispatched")
+                log.warning(
+                    "defensive lock release: worker never dispatched "
+                    "(client gone before stream body started)"
+                )
 
         return StreamingResponse(
             event_generator(),
@@ -741,22 +766,16 @@ async def ask_ai_stream(request: UserRequest, http_request: Request):
             background=BackgroundTask(_defensive_cleanup),
         )
 
-
     except HTTPException:
-        # Pre-stream validation failed before the worker thread was started.
-        _busy_since["t"] = None
-        if _gen_owner["token"] == my_token:
-            _gen_owner["token"] = None
-            _gen_worker_started["started"] = False
-            GEN_LOCK.release()
+        # Setup failed before dispatch — handler still owns the lock.
+        if not worker_dispatched:
+            _release_once("http-exception-pre-dispatch")
         raise
     except Exception:
-        _busy_since["t"] = None
-        if _gen_owner["token"] == my_token:
-            _gen_owner["token"] = None
-            _gen_worker_started["started"] = False
-            GEN_LOCK.release()
+        if not worker_dispatched:
+            _release_once("exception-pre-dispatch")
         raise
+
 
 
 @app.post("/chat")
