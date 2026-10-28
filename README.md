@@ -223,7 +223,6 @@ shell-mind/
 │   └── script.js           # Threads, attachments, neural loader
 ├── tests/
 │   │   └── test_server_contract.py   # 43 API contract tests — run GPU-less on any machine
-
 ├── cli.py                  # Thin terminal client (never loads models)
 ├── vram_chart.py           # Portfolio chart from vram_timeline.json
 ├── requirements.txt
