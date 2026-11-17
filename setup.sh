@@ -117,7 +117,7 @@ else
   else
     echo "⚠ Tailscale not detected — make sure the app/VPN is on before connecting."
   fi
-  read -rp "Server's tailnet IP (e.g. 100.x.y.z): " SRV
+  read -rp "Server URL or tailnet IP (e.g. http://100.x.y.z:8000 or 100.x.y.z): " SRV
   read -rp "API key from the server owner (Enter if auth is off): " KEY
   export _SM_SRV="$SRV"
   export _SM_KEY="$KEY"
@@ -133,7 +133,16 @@ if p.exists():
             continue
         k, _, v = s.partition("=")
         data[k.strip()] = v.strip()
-data["SHELL_MIND_SERVER"] = "http://%s:8000" % os.environ["_SM_SRV"]
+raw = (os.environ.get("_SM_SRV") or "").strip()
+if "://" not in raw:
+    raw = "http://" + raw
+from urllib.parse import urlparse as _up
+_p = _up(raw)
+_host = _p.hostname or "localhost"
+_port = _p.port or 8000
+if ":" in _host and not _host.startswith("["):
+    _host = "[" + _host + "]"
+data["SHELL_MIND_SERVER"] = f"{_p.scheme or 'http'}://{_host}:{_port}"
 if os.environ.get("_SM_KEY"):
     data["SHELL_MIND_API_KEY"] = os.environ["_SM_KEY"]
 p.write_text("\n".join(f"{k}={v}" for k, v in data.items()) + "\n")

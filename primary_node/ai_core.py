@@ -137,7 +137,9 @@ init_db()
 # ==========================================
 # 2. UPLOAD HANDLING (server-issued paths only)
 # ==========================================
-ALLOWED_EXT = {".jpeg", ".jpg", ".png", ".gif", ".pdf", ".txt", ".csv"}
+ALLOWED_DOC_EXT = {".pdf", ".txt", ".csv"}
+ALLOWED_IMG_EXT = {".jpeg", ".jpg", ".png", ".gif"}
+ALLOWED_EXT = ALLOWED_DOC_EXT | ALLOWED_IMG_EXT
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024      # keep in sync with the frontend label
 UPLOAD_MAX_AGE_S = 24 * 3600             # stale uploads are purged
 UPLOADS_TOTAL_CAP_BYTES = 500 * 1024 * 1024   # disk-fill guard across ALL uploads
@@ -176,19 +178,22 @@ def _uploads_dir_bytes() -> int:
     return total
 
 
-def _save_upload(file: UploadFile) -> Path:
+def _save_upload(file: UploadFile, allowed: set | None = None) -> Path:
     """Validate and store an upload under a fresh UUID name in UPLOADS_DIR.
 
     The original filename never touches the filesystem — only the
     whitelisted extension does — which removes any path-traversal surface.
+    R6: pass ALLOWED_DOC_EXT or ALLOWED_IMG_EXT from the endpoint.
     """
+    if allowed is None:
+        allowed = ALLOWED_EXT
     if not file.filename:
         raise HTTPException(400, "upload has no filename")
     suffix = Path(file.filename).suffix.lower()
-    if suffix not in ALLOWED_EXT:
+    if suffix not in allowed:
         raise HTTPException(
             415, f"file type '{suffix or '(none)'}' not allowed "
-                 f"(allowed: {', '.join(sorted(ALLOWED_EXT))})")
+                 f"(allowed: {', '.join(sorted(allowed))})")
 
     _purge_stale_uploads()
     stored_total = _uploads_dir_bytes()
@@ -210,13 +215,15 @@ def _save_upload(file: UploadFile) -> Path:
                 out.write(chunk)
 
         # M5: content sniff — extension alone is not enough
-        head = save_path.read_bytes()[:16]
+        with open(save_path, "rb") as _hf:
+            head = _hf.read(16)  # RA-12
         if suffix == ".pdf":
             if not head.startswith(b"%PDF"):
                 raise HTTPException(415, "file extension is .pdf but content is not a PDF")
         elif suffix in {".png", ".jpg", ".jpeg", ".gif"}:
             try:
                 from PIL import Image
+                Image.MAX_IMAGE_PIXELS = 40_000_000  # RA-12
                 with Image.open(save_path) as im:
                     im.verify()
             except HTTPException:
@@ -365,7 +372,7 @@ def _rollback_rate_hit(client_ip: str, stamp: float | None) -> None:
 # ==========================================
 # 4. FASTAPI SETUP & HARDWARE DETECTION
 # ==========================================
-app = FastAPI(title="Shell-Mind")
+app = FastAPI(title="Shell-Mind", docs_url=None, redoc_url=None, openapi_url=None)  # RA-11
 # Local workstation served to a trusted LAN/Tailscale network; the clients
 # are plain browsers/CLIs with no cookies, so wildcard origins are fine —
 # credentials stay disabled (an invalid CORS combination anyway).
@@ -464,10 +471,11 @@ app.add_middleware(
 # ==========================================
 # Copilot tiers route through the role system — models.json remaps
 # them exactly like the agent roles (with not-cached fallback).
-COPILOT_IDS = {
-    "gpu": REGISTRY[role_key("copilot_gpu")].hf_id,   # 4-bit NF4 on the GPU
-    "cpu": REGISTRY[role_key("copilot_cpu")].hf_id,   # fp32 on CPU, GPU free
-}
+def _copilot_id(tier: str) -> str:
+    """Resolve copilot HF id at call time (RA-07) so models.json edits apply."""
+    role = "copilot_gpu" if tier == "gpu" else "copilot_cpu"
+    return REGISTRY[role_key(role)].hf_id
+
 
 model: Any = None
 tokenizer: Any = None
@@ -518,7 +526,7 @@ def _ensure_copilot(want: str) -> None:
         zoo.unload_worker()
         zoo.unload_resident()
 
-    model_id = COPILOT_IDS[want]
+    model_id = _copilot_id(want)
     if want == "gpu":
         quant = BitsAndBytesConfig(load_in_4bit=True,
                                    bnb_4bit_compute_dtype=torch.bfloat16,
@@ -595,7 +603,7 @@ def upload_image_endpoint(file: UploadFile = File(...),
                           request: Request = None) -> Dict[str, str]:
     client_ip = request.client.host if request and request.client else "unknown"
     rate_stamp = _check_rate_limit(client_ip)
-    return {"image_path": _save_upload(file).name}
+    return {"image_path": _save_upload(file, ALLOWED_IMG_EXT).name}
 
 
 @app.post("/upload")
@@ -603,7 +611,7 @@ def upload_document_endpoint(file: UploadFile = File(...),
                              request: Request = None) -> Dict[str, str]:
     client_ip = request.client.host if request and request.client else "unknown"
     _check_rate_limit(client_ip)
-    return {"document_path": _save_upload(file).name,
+    return {"document_path": _save_upload(file, ALLOWED_DOC_EXT).name,
             "status": "stored_for_processing"}
 
 @app.post("/chat/stream")
@@ -733,7 +741,20 @@ async def ask_ai_stream(request: UserRequest, http_request: Request):
                 # BackgroundTask defensive cleanup.
                 worker_dispatched = True
                 thread.start()
-                for token in streamer:
+                # RA-02: TextIteratorStreamer.__next__ blocks on queue.get —
+                # never call it on the event-loop thread.
+                _it = iter(streamer)
+
+                def _next_token():
+                    try:
+                        return next(_it)
+                    except StopIteration:
+                        return None
+
+                while True:
+                    token = await anyio.to_thread.run_sync(_next_token)
+                    if token is None:
+                        break
                     accumulated.append(token)
                     yield f"data: {json.dumps({'token': token})}\n\n"
                 full_reply = "".join(accumulated).strip()
@@ -855,12 +876,15 @@ def ask_ai(request: UserRequest, http_request: Request) -> Dict[str, Any]:
 
         # --- TIER 1 & 2: CPU LITE / GPU COPILOT ---
         # H6: never start a multi-GB download inside an HTTP request
-        copilot_role = "copilot_gpu" if request.mode == "gpu" else "copilot_cpu"
+        effective = request.mode
+        if effective == "gpu" and not HAS_GPU:
+            effective = "cpu"
+        copilot_role = "copilot_gpu" if effective == "gpu" else "copilot_cpu"
         # cpu mode on a GPU host still uses copilot_cpu role
         if request.mode in ("gpu", "cpu") and not has_model(role_key(copilot_role)):
             return {
                 "answer": (
-                    f"⚠️ The {request.mode} copilot model is not in the local cache yet. "
+                    f"⚠️ The {effective} copilot model is not in the local cache yet. "
                     "Preload it once on this machine, then retry:\n\n"
                     "  python -c \"from huggingface_hub import snapshot_download; "
                     "snapshot_download('<hf_id from models.json / README>')\"\n\n"

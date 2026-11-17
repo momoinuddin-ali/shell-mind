@@ -54,11 +54,14 @@ The frontend is a dependency-free custom web stack (HTML5, CSS3, ES6) with glass
 
 ---
 
+## Shipped in v1.3.1+
+
+- Real-time streaming via Server-Sent Events (SSE) on `POST /chat/stream` for CPU Lite and GPU Copilot modes (agent pipeline stays on non-streaming `/chat`).
+
 ## Future work
 
 - GGML/GGUF backends (e.g. llama.cpp) to offload model layers to system RAM and unlock larger coders.
 - Expansion of RAG (e.g. Chroma/FAISS) for larger document collections.
-- Real-time streaming via WebSockets or Server-Sent Events (SSE).
 - Optional function-calling / web-search agents for dynamic information retrieval.
 - Optional calibrated non-generative router backends for structured planning.
 

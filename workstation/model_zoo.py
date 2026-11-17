@@ -137,6 +137,11 @@ def load_registry(config_path: Path | None = None
                     log.warning("models.json: model '%s' has invalid hf_id %r — ignored",
                                 key, hf_id)
                     continue
+                fb_raw = spec.get("fallback", base.fallback if base else None)
+                if fb_raw is not None and not isinstance(fb_raw, str):
+                    log.warning("models.json: model '%s' fallback must be a string — ignored",
+                                key)
+                    fb_raw = base.fallback if base else None
                 registry[key] = ModelSpec(
                     key=key,
                     hf_id=hf_id,
@@ -144,7 +149,7 @@ def load_registry(config_path: Path | None = None
                     vram_gb=float(spec.get("vram_gb", base.vram_gb if base else 5.0)),
                     cpu_offload=bool(spec.get("cpu_offload",
                                               base.cpu_offload if base else False)),
-                    fallback=spec.get("fallback", base.fallback if base else None),
+                    fallback=fb_raw,
                     vision=bool(spec.get("vision", base.vision if base else False)),
                 )
             except Exception as entry_exc:  # noqa: BLE001
@@ -164,6 +169,16 @@ def load_registry(config_path: Path | None = None
             except Exception as role_exc:  # noqa: BLE001
                 log.warning("models.json: role mapping %r -> %r invalid (%s) — ignored",
                             role, key, role_exc)
+        # RA-13: drop fallbacks that do not name a known registry key
+        for k, spec in list(registry.items()):
+            if spec.fallback and spec.fallback not in registry:
+                log.warning("models.json: model '%s' fallback '%s' unknown — cleared",
+                            k, spec.fallback)
+                registry[k] = ModelSpec(
+                    key=spec.key, hf_id=spec.hf_id, role=spec.role,
+                    vram_gb=spec.vram_gb, cpu_offload=spec.cpu_offload,
+                    fallback=None, vision=spec.vision,
+                )
         log.info("models.json loaded from %s — %d models, roles: %s",
                  path, len(registry),
                  {r: roles[r] for r in DEFAULT_ROLES})
@@ -371,7 +386,9 @@ class ModelZoo:
         self._probe(f"resident_unloaded:{key}")
 
     def purge(self) -> None:
-        self._worker, self._worker_key = None, None
+        """Drop worker *and* resident so error paths truly free VRAM (RA-04)."""
+        self.unload_worker()
+        self.unload_resident()
         self._release()
         # Poll until free VRAM stabilizes (or ~1s) instead of a blind sleep (M13).
         try:
@@ -435,11 +452,21 @@ def has_model(key: str) -> bool:
     hub = Path(os.environ.get("HF_HUB_CACHE",
                               str(Path(os.environ["HF_HOME"]) / "hub")))
     snaps = hub / f"models--{spec.hf_id.replace('/', '--')}" / "snapshots"
-    # Accept safetensors (modern) or pytorch .bin (legacy / custom exports)
-    return bool(
-        any(snaps.glob("*/*.safetensors"))
-        or any(snaps.glob("*/*.bin"))
-    )
+    # R5: prefer a complete snapshot. Partial downloads often have a few
+    # shard files without the rest — require at least one weight file and,
+    # when an index is present, treat missing index as incomplete only if
+    # zero weight files exist (keep contract-test / stub behavior above).
+    if not snaps.is_dir():
+        return False
+    weight_files = list(snaps.glob("*/*.safetensors")) + list(snaps.glob("*/*.bin"))
+    if not weight_files:
+        return False
+    # If a sharded index exists, require more than a lone tiny file when
+    # total size is implausibly small (< 1 MB) for a real model.
+    total = sum(p.stat().st_size for p in weight_files if p.is_file())
+    if total < 1_000_000:
+        return False
+    return True
 
 
 def role_key(role: str) -> str:

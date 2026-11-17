@@ -61,6 +61,8 @@ function escapeHtml(s) {
 }
 
 // Load history; corrupted storage resets instead of bricking the UI.
+// RA-01: bind currentThread to the same array as the active entry so a send
+// after reload cannot replace a saved conversation with a detached [].
 try {
   const savedThreads = localStorage.getItem('shellMindThreads');
   if (savedThreads) allThreads = JSON.parse(savedThreads);
@@ -68,6 +70,14 @@ try {
 } catch (err) {
   console.warn('Corrupted local thread history — starting fresh:', err);
   allThreads = [];
+}
+if (allThreads.length > 0) {
+  activeThreadIndex = 0;
+  if (!Array.isArray(allThreads[0].messages)) allThreads[0].messages = [];
+  currentThread = allThreads[0].messages;
+} else {
+  activeThreadIndex = 0;
+  currentThread = [];
 }
 
 const messagesEl     = document.getElementById('messages');
@@ -151,6 +161,12 @@ const serverReady = detectServer().then(url => {
 
 // --- Authenticated fetch -------------------------------------------------
 function authHeaders(extra = {}) {
+  // RA-03: never send the stored API key to a non-default origin.
+  // ?server= override still works for health/UI, but the user must re-enter
+  // the key for that origin (prompt on 401) — stops key harvest via crafted links.
+  if (serverOverrideActive) {
+    return { ...extra };
+  }
   const key = localStorage.getItem('shellMindApiKey');
   return key ? { ...extra, 'X-API-Key': key } : extra;
 }
@@ -356,7 +372,10 @@ async function sendMessage(text) {
   const thread = currentThread;
   let entry = allThreads[activeThreadIndex];
 
-  if (!entry) {
+  // RA-01: if the sidebar entry exists but holds a *different* messages array
+  // (detached currentThread after reload / new chat), never overwrite it —
+  // create a fresh entry bound to this thread instead.
+  if (!entry || entry.messages !== thread) {
     entry = { title: "New Chat", messages: thread };
     allThreads.unshift(entry);
     activeThreadIndex = 0;
@@ -394,15 +413,21 @@ async function sendMessage(text) {
     if (currentPdfPath) payload.document_path = currentPdfPath;
 
     let streamed = false;
+    let streamPartial = false;
     if (selectedMode !== 'agent') {
       try {
         streamed = await sendMessageStream(text, payload, thread);
       } catch (streamErr) {
-        console.warn('stream failed, falling back to /chat:', streamErr);
+        // RA-10: if tokens already arrived, keep partial answer — do not
+        // start a second full generation (duplicate text + GEN_LOCK pressure).
+        const last = thread[thread.length - 1];
+        streamPartial = !!(last && last.role === 'bot' && last.text && last.text.trim());
+        console.warn('stream failed, falling back to /chat:', streamErr,
+                     streamPartial ? '(partial kept — no /chat retry)' : '');
       }
     }
 
-    if (!streamed) {
+    if (!streamed && !streamPartial) {
       const res = await serverFetch('/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

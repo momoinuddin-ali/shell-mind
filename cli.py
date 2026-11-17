@@ -66,9 +66,13 @@ def _auth_headers(api_key: str | None) -> dict:
 
 
 def _normalize_server_url(raw: str) -> str:
-    """Accept host, host:port, or full URL; preserve scheme; default port 8000."""
+    """Accept host, host:port, or full URL; preserve scheme; default port 8000.
+
+    RA-06: re-bracket IPv6 hostnames (urlparse strips brackets). Do not
+    strip '%' (zone IDs) — that produced invalid hosts.
+    """
     from urllib.parse import urlparse
-    raw = (raw or "").strip().replace("%", "").replace(" ", "")
+    raw = (raw or "").strip().replace(" ", "")
     if not raw:
         return DEFAULT_LOCAL
     if "://" not in raw:
@@ -77,6 +81,8 @@ def _normalize_server_url(raw: str) -> str:
     scheme = parsed.scheme or "http"
     host = parsed.hostname or "localhost"
     port = parsed.port or 8000
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
     return f"{scheme}://{host}:{port}"
 
 
