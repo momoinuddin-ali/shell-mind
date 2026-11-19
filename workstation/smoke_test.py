@@ -19,7 +19,7 @@ import os
 import sys
 import time
 
-from .model_zoo import REGISTRY, ModelZoo  # MUST be first — sets env before torch
+from workstation.model_zoo import REGISTRY, ModelZoo  # MUST be first — sets env before torch
 import torch
 
 logging.basicConfig(level=logging.INFO,
