@@ -18,7 +18,7 @@ import logging
 import time
 
 from . import agents, router
-from .model_zoo import get_zoo, has_model, role_key
+from .model_zoo import REGISTRY, get_zoo, has_model, role_key
 
 log = logging.getLogger("shell-mind.mind")
 
@@ -66,7 +66,15 @@ def run_agentic_pipeline(prompt: str, image_path: str | None = None,
         plan["needs_vision"] = True
 
     # 2) vision (optional) -> compact text CONTEXT for the worker
-    vision_ready = image_path is not None and has_model(role_key("vision"))
+    # R8: the vision role must point at a model that actually has the
+    # vision capability — has_model() alone would let a models.json
+    # remap of "vision" to a text-only model pass the gate and then
+    # fail (or worse, guess) inside agents.see().
+    vision_ready = (
+        image_path is not None
+        and has_model(role_key("vision"))
+        and REGISTRY[role_key("vision")].vision
+    )
     if task == "vision_only" and not vision_ready:
         return {
             "answer": ("⚠️ This request needs the vision specialist, but "

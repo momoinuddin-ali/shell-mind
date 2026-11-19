@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
 
@@ -149,13 +150,32 @@ def main() -> None:
                 zoo.load_resident("router")  # restore resident if production-like
             except Exception:
                 log.warning("router re-resident after coexistence failed — lazy reload later")
-            results.append({
-                "key": "coexistence:router+critic",
-                "ok": True,
-                "load_s": 0,
-                "tok_s": 0,
-                "free_after": round(free, 2),
-            })
+            # R12: "coexists" must mean something. Both models resident
+            # with the allocator squeezed to the floor still passes the
+            # letter of the claim while breaking the KV-cache headroom
+            # contract in production. Assert a real VRAM floor.
+            floor = float(os.environ.get("SHELL_MIND_COEXIST_FLOOR_GB", "0.5"))
+            if free < floor:
+                log.error(
+                    "coexistence check FAILED: only %.2f GB free with router + "
+                    "critic resident (floor %.2f GB) — KV-cache headroom contract "
+                    "violated on this card", free, floor)
+                results.append({
+                    "key": "coexistence:router+critic",
+                    "ok": False,
+                    "load_s": 0,
+                    "tok_s": 0,
+                    "free_after": round(free, 2),
+                    "error": f"only {free:.2f} GB free, floor is {floor:.2f} GB",
+                })
+            else:
+                results.append({
+                    "key": "coexistence:router+critic",
+                    "ok": True,
+                    "load_s": 0,
+                    "tok_s": 0,
+                    "free_after": round(free, 2),
+                })
         except Exception as exc:                   # noqa: BLE001
             err = f"{type(exc).__name__}: {exc}"
             log.error("coexistence failed: %s", err)

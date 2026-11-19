@@ -114,7 +114,7 @@ All tiers load **lazily on first use** — the server starts serving `/health` w
 | **VRAM timeline** | Pipeline dumps `vram_timeline.json`; `vram_chart.py` produces a portfolio-ready chart |
 | **Decoupled clients** | Vanilla HTML/CSS/JS glassmorphism UI + independent terminal CLI (uploads images itself, works cross-machine) |
 | **Thread history** | Client-side `localStorage` threads; server-side append-only SQLite log for academic review. Requests themselves are stateless — there is no server-side conversation memory (yet) |
-| **Streaming (SSE)** | Copilot modes (`cpu`/`gpu`) stream tokens via `/chat/stream` using Server-Sent Events — first token arrives in ~0.5–1 s instead of waiting for the full reply. Agent mode stays on `/chat` (non-streaming) because the 4-model pipeline needs full drafts between stages |
+| **Streaming (SSE)** | Copilot modes (`cpu`/`gpu`) stream tokens via `/chat/stream` using Server-Sent Events — first token arrives in ~0.5–1 s instead of waiting for the full reply. A single pump thread feeds the event loop (no per-token threadpool hops, so streams don't add latency to other requests), client disconnect aborts generation at the next forward pass, and prompts + document context are sanitized against chat-template control tokens. Agent mode stays on `/chat` (non-streaming) because the 4-model pipeline needs full drafts between stages |
 
 
 ---
@@ -209,7 +209,7 @@ product polish; see Future Work.
 ```
 shell-mind/
 ├── primary_node/
-│   └── ai_core.py          # FastAPI server: tiers, uploads, RAG-lite, audit log
+│   └── ai_core.py          # FastAPI server: tiers, uploads, RAG-lite, audit log, SSE
 ├── workstation/
 │   ├── model_zoo.py        # Loading layer, VRAM accounting, fallback chain
 │   ├── router.py           # 1.5 B planner → strict JSON plan
@@ -220,13 +220,20 @@ shell-mind/
 ├── frontend/
 │   ├── index.html
 │   ├── style.css           # Dark glassmorphism UI
-│   └── script.js           # Threads, attachments, neural loader
+│   └── script.js           # Threads, attachments, SSE client, neural loader
 ├── tests/
-│   │   └── test_server_contract.py   # 43 API contract tests — run GPU-less on any machine
+│   └── test_server_contract.py   # 65 API contract tests — run GPU-less on any machine
+├── .github/workflows/test.yml    # CI: contract suite + AST parse gate on every push
 ├── cli.py                  # Thin terminal client (never loads models)
 ├── vram_chart.py           # Portfolio chart from vram_timeline.json
-├── requirements.txt
+├── setup.sh                # Interactive bootstrap: server (env, key, run) / client (.env)
+├── models.example.json     # Copy to models.json to remap roles / add models
+├── requirements.txt        # Full (GPU) dependencies
+├── requirements-ci.txt     # Slim CI deps (no CUDA wheels)
 ├── CHANGES.md              # Hardening changelog: every fix, before → after
+├── SYNOPSIS.md             # Academic abstract & scope
+├── SECURITY.md             # Threat model & responsible disclosure
+├── LICENSE
 └── README.md
 ```
 
@@ -368,7 +375,7 @@ SHELL_MIND_DB=/path/to.db       # override audit DB path
 | `POST /chat 401` | Missing or wrong API key |
 | `429` / `503` | Rate limit or server busy — retry shortly |
 | `POST /chat/stream 200` | Streaming request started — SSE frames flowing |
-| `client disconnected mid-stream` | Client dropped SSE connection; worker releases lock when generation completes |
+| `client disconnected mid-stream; abort event set` | Client dropped SSE connection — generation stops at the next forward pass and the pump releases the lock |
 | `defensive lock release: worker never started` | Rare race hit (early disconnect); safety net released lock — server healthy |
 
 
@@ -408,7 +415,7 @@ Example request:
 }
 ```
 
-**Upload rules.** Uploads are capped at 25 MB and restricted to `.pdf .txt .csv .jpg .jpeg .png .gif`; the server stores them under UUID names in `uploads/` and returns the server-side path. `/chat` accepts **only** those server-issued paths — arbitrary filesystem paths are rejected with HTTP 400. Stale uploads are purged after 24 h. Rejections return proper status codes: `413` (too large), `415` (bad type), `400`/`404` (bad/expired path), `422` (invalid mode).
+**Upload rules.** Uploads are capped at 25 MB and restricted to `.pdf .txt .csv .jpg .jpeg .png .gif`; the server stores them under UUID names in `uploads/` and returns an **opaque token** (the UUID basename only — never an absolute filesystem path). `/chat` accepts **only** those server-issued tokens — arbitrary filesystem paths are rejected with HTTP 400, unknown tokens with 404. Stale uploads are purged after 24 h. Rejections return proper status codes: `413` (too large), `415` (bad type), `400`/`404` (bad/expired token), `422` (invalid mode).
 
 **Optional API key.** Start the server with `SHELL_MIND_API_KEY=<shared-secret>` to require an `X-API-Key` header on `/chat`, `/upload` and `/upload_image` (invalid/missing key → `401`; `/health` stays open). The web UI prompts for the key once and remembers it locally (forget it via **Clear All Data**); the CLI takes `--key` or the same environment variable. Leave the variable unset for open access inside a private tailnet.
 
@@ -441,7 +448,7 @@ python vram_chart.py --last 22        # zoom on the last 22 samples
 
 The smoke test asserts that each model can load, generate, unload, and actually free VRAM (within a 1.5 GB CUDA-context tolerance), plus a router+critic coexistence check — the core architecture claim.
 
-The contract suite (43 tests, torch/transformers stubbed) locks in the security and API rules on any laptop in seconds: upload whitelist/cap, path validation (only server-issued paths accepted), status codes (413/415/400/404/422), RAG context injection, and audit-log appends. It catches regressions the stubs can't see — real CUDA/OOM behavior is the smoke test's job on the hardware.
+The contract suite (65 tests, torch/transformers stubbed) locks in the security and API rules on any laptop in seconds: upload whitelist/cap, path validation (only server-issued tokens accepted), status codes (413/415/400/404/422), RAG context injection, audit-log appends, the Wave C streaming contract (prompt sanitization, abort-on-disconnect criteria, pump/done frames, audit coverage on failed streams), and the Wave D residuals (gpu→cpu stream downgrade, vision capability gate, raw-ASGI 411 chunked lock). It catches regressions the stubs can't see — real CUDA/OOM behavior is the smoke test's job on the hardware.
 
 ---
 
@@ -476,7 +483,7 @@ The contract suite (43 tests, torch/transformers stubbed) locks in the security 
 
 Stated honestly, because they shaped the design:
 - **Sequential swap latency** — a 7 B model load costs ~16 s on the RTX 5050, with smaller models loading proportionally faster; agent runs take minutes, not seconds. 
-- **Streaming tradeoffs** — SSE is implemented for copilot modes only. Three known limitations, all documented for v2.0: (1) per-token event-loop yield adds ~50–100 ms latency to other requests during active streams; (2) client disconnect does not abort generation — the worker completes its bounded token budget before releasing the lock; (3) user prompts are not yet sanitized for chat-template control tokens.
+- **Streaming tradeoffs** — SSE is implemented for copilot modes only. The original v1.3 limitations were fixed in Wave C (v1.4): per-token threadpool hops replaced by a single pump thread feeding an `asyncio.Queue`; client disconnect now sets an abort event honored by a `StoppingCriteria` at the next forward pass; prompts and document context are sanitized for chat-template control tokens. Remaining, documented: abort granularity is one forward pass (a long pass delays the stop by up to ~seconds, not the full budget), and the audit entry for an aborted stream records `(aborted: …)` with whatever tokens were produced.
 - **No server-side conversation memory** — each request is independent; threads live in the client's `localStorage`.
 - **Single user / single worker** — one GPU owner, one uvicorn worker; requests serialize on a generation lock.
 - **Shared-key auth, not per-user** — `SHELL_MIND_API_KEY` gates *access*; the audit log attributes clients by IP, not by identity.

@@ -57,6 +57,7 @@ The frontend is a dependency-free custom web stack (HTML5, CSS3, ES6) with glass
 ## Shipped in v1.3.1+
 
 - Real-time streaming via Server-Sent Events (SSE) on `POST /chat/stream` for CPU Lite and GPU Copilot modes (agent pipeline stays on non-streaming `/chat`).
+- v1.4 streaming hardening: single-pump thread feeding the event loop (streams add no per-token latency to other requests), generation aborts at the next forward pass on client disconnect, and prompts/document context are sanitized against chat-template control tokens; every stream outcome (completed, aborted, failed) is written to the audit log.
 
 ## Future work
 

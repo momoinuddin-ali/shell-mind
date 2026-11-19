@@ -264,32 +264,40 @@ function showTypingIndicator() {
 }
 
 function persistThreads() {
+  // R9: persist is proactive — always cap the thread list and trim huge
+  // messages BEFORE writing, not only after a QuotaExceededError. The
+  // updatedAt stamp is set on every thread mutation in sendMessage /
+  // newChat, so the "keep most recent" sort key is live, never dead.
   const MAX_THREADS = 30;
   const MAX_MSG_CHARS = 8000;
+  const normalize = (threads) => {
+    let out = Array.isArray(threads) ? threads.slice() : [];
+    if (out.length > MAX_THREADS) {
+      out = out
+        .slice()
+        .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+        .slice(0, MAX_THREADS);
+    }
+    return out.map(t => ({
+      ...t,
+      messages: (t.messages || []).map(m => ({
+        ...m,
+        text: typeof m.text === 'string' && m.text.length > MAX_MSG_CHARS
+          ? m.text.slice(0, MAX_MSG_CHARS) + '\n…[truncated]'
+          : m.text,
+      })),
+    }));
+  };
   try {
+    allThreads = normalize(allThreads);
     localStorage.setItem('shellMindThreads', JSON.stringify(allThreads));
   } catch (err) {
-    // QuotaExceededError or similar — prune oldest, trim huge messages, retry once
+    // QuotaExceededError or similar — one best-effort retry on the
+    // pruned data; history is never allowed to break the send path.
     try {
-      let threads = Array.isArray(allThreads) ? allThreads.slice() : [];
-      if (threads.length > MAX_THREADS) {
-        threads = threads
-          .slice()
-          .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
-          .slice(0, MAX_THREADS);
-      }
-      threads = threads.map(t => ({
-        ...t,
-        messages: (t.messages || []).map(m => ({
-          ...m,
-          text: typeof m.text === 'string' && m.text.length > MAX_MSG_CHARS
-            ? m.text.slice(0, MAX_MSG_CHARS) + '\n…[truncated]'
-            : m.text,
-        })),
-      }));
-
-      allThreads = threads;
-      localStorage.setItem('shellMindThreads', JSON.stringify(allThreads));
+      const pruned = normalize(allThreads.slice(0, MAX_THREADS));
+      allThreads = pruned;
+      localStorage.setItem('shellMindThreads', JSON.stringify(pruned));
     } catch (_) {
       // give up silently — history is best-effort
     }
@@ -337,6 +345,12 @@ async function sendMessageStream(text, payload, thread) {
         if (parsed.token) {
           botMsg.text += parsed.token;
           renderMessages();
+        } else if (parsed.error) {
+          // Wave C: terminal failure frame from the server — surface it
+          // instead of leaving a silently truncated answer.
+          botMsg.text += (botMsg.text ? '\n\n' : '') + `⚠ ${parsed.error}`;
+          botMsg.error = true;
+          renderMessages();
         } else if (parsed.done && parsed.answer) {
           botMsg.text = parsed.answer;
         }
@@ -376,7 +390,7 @@ async function sendMessage(text) {
   // (detached currentThread after reload / new chat), never overwrite it —
   // create a fresh entry bound to this thread instead.
   if (!entry || entry.messages !== thread) {
-    entry = { title: "New Chat", messages: thread };
+    entry = { title: "New Chat", messages: thread, updatedAt: Date.now() };
     allThreads.unshift(entry);
     activeThreadIndex = 0;
   }
@@ -388,6 +402,7 @@ async function sendMessage(text) {
     entry.title = title;
     renderThreadList();
   }
+  entry.updatedAt = Date.now();   // R9: keep the LRU sort key live
 
   renderMessages();
   promptInput.value = '';
@@ -497,7 +512,7 @@ newChatBtn.addEventListener('click', () => {
     }
   }
   currentThread = [];
-  allThreads.unshift({ title: "New Chat", messages: [] });
+  allThreads.unshift({ title: "New Chat", messages: [], updatedAt: Date.now() });
   activeThreadIndex = 0;
   persistThreads();
   renderThreadList();

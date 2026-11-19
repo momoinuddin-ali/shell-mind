@@ -19,12 +19,14 @@ for the web UI (the API server serves the frontend itself):
 """
 
 from __future__ import annotations
-import json 
+import asyncio
+import json
 import anyio
 import gc
 import logging
 import hmac
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -370,6 +372,77 @@ def _rollback_rate_hit(client_ip: str, stamp: float | None) -> None:
             _rate_hits.pop(client_ip, None)
 
 # ==========================================
+# 3b. PROMPT SANITIZATION (streaming tradeoff #3)
+# ==========================================
+# User text and uploaded-document context are concatenated into the chat
+# template. A prompt containing raw chat-control tokens (<|im_end|>,
+# <|endoftext|>, <think>) can close the user turn early and smuggle a fake
+# system/assistant turn into the model context. Neutralize the angle-bracket
+# spellings the Qwen family (and most HF chat templates) treats as turn
+# boundaries. The plain-word spellings are left alone — users legitimately
+# write "think" or "im_end" in prose.
+
+# Special tokens that act as turn boundaries / generation-control markers
+# in Qwen-style chat templates: pipe-delimited ChatML forms (<|im_end|>,
+# <|endoftext|>, <|im_start|>) plus the bare <think> / </think> markers.
+_TURN_TOKEN_RE = re.compile(
+    r"<\s*\|?\s*/?\s*(?:think|im_end|endoftext|im_start|"
+    r"system|assistant|user)\s*\|?\s*>",
+    re.IGNORECASE)
+
+
+def _sanitize_prompt(text: str) -> str:
+    """Neutralize chat-template control tokens in untrusted text (S3).
+
+    Replaces the leading angle bracket with its fullwidth form so the
+    token no longer matches any special-token spelling the tokenizer
+    knows, while the visible text stays readable. Applied to the raw
+    prompt AND to RAG document context in /chat, /chat/stream and the
+    agent pipeline. Best-effort, never raises, never truncates.
+    """
+    if not text:
+        return text
+    try:
+        return _TURN_TOKEN_RE.sub(lambda m: m.group(0).replace("<", "\uff1c", 1),
+                                  text)
+    except Exception:                                   # noqa: BLE001
+        return text
+
+
+# ==========================================
+# 3c. STREAMING STOP CRITERION (streaming tradeoff #2)
+# ==========================================
+class _StopOnEvent:
+    """torch `StoppingCriteria` that ends generation when the client
+    disconnects (S2). Runs inside `model.generate`, so abort costs one
+    forward pass instead of the full 1500-token budget."""
+
+    def __init__(self, event: threading.Event):
+        self._event = event
+
+    def __call__(self, input_ids, scores, **kwargs) -> bool:
+        return self._event.is_set()
+
+
+def _stop_criteria(abort_event: threading.Event):
+    """Build the stopping-criteria container for a bound abort event.
+
+    Wrapped so the GPU-less contract tests can stub `transformers` with a
+    module that has no `StoppingCriteriaList` (the stub's generate ignores
+    the kwarg entirely) — in that case a plain list keeps the same shape.
+    """
+    try:
+        from transformers import StoppingCriteria, StoppingCriteriaList
+    except ImportError:
+        return [ _StopOnEvent(abort_event) ]
+
+    class _Bound(_StopOnEvent, StoppingCriteria):
+        pass
+
+    return StoppingCriteriaList([_Bound(abort_event)])
+
+
+# ==========================================
 # 4. FASTAPI SETUP & HARDWARE DETECTION
 # ==========================================
 app = FastAPI(title="Shell-Mind", docs_url=None, redoc_url=None, openapi_url=None)  # RA-11
@@ -483,6 +556,10 @@ _copilot_key: Dict[str, Optional[str]] = {"tier": None}   # None | "gpu" | "cpu"
 _tier: Dict[str, str] = {"current": "cpu" if not HAS_GPU else "copilot-idle"}
 
 GEN_LOCK = threading.Lock()
+# After the streamer is exhausted, give a wedged generate() this long to
+# return before the pump releases GEN_LOCK anyway (Wave C S2 follow-up):
+# a stuck generation must not 503 the server forever.
+_GEN_JOIN_TIMEOUT_S = float(os.environ.get("SHELL_MIND_GEN_JOIN_TIMEOUT_S", "30"))
 _busy_since: Dict[str, Optional[float]] = {"t": None}   # for queue feedback
 _gen_owner: Dict[str, Optional[str]] = {"token": None}
 
@@ -623,11 +700,27 @@ async def ask_ai_stream(request: UserRequest, http_request: Request):
       * Until the worker thread is *dispatched*, the async handler owns
         release (HTTPException / setup failure / defensive cleanup).
       * After ``worker_dispatched = True`` (set synchronously *before*
-        ``thread.start()``), **only** the worker's ``finally`` may release.
+        ``thread.start()``), **only** the pump thread's ``finally`` may
+        release.
       * ``_release_once`` is idempotent under a local lock so defensive
-        cleanup and worker finally can never both unlock the global lock.
-      * ``streamer.end()`` always runs in the worker finally so the
+        cleanup and pump finally can never both unlock the global lock.
+      * ``streamer.end()`` always runs in the pump finally so the
         iterator cannot block forever on queue.get().
+
+    Wave C — the three v2.0 streaming limitations, fixed:
+      * S1: one pump thread feeds tokens into an asyncio.Queue via
+        loop.call_soon_threadsafe; the event loop only awaits queue.get()
+        per token. No per-token threadpool round-trips, so an active
+        stream no longer adds latency to other requests.
+      * S2: client disconnect sets an abort event checked by a torch
+        StoppingCriteria — generation stops at the next forward pass
+        instead of burning the remaining token budget with nobody
+        watching.
+      * S3: prompt and document context are sanitized for chat-template
+        control tokens before they reach the tokenizer.
+      * S4 (found in review): the interaction is audited on every
+        terminal path (completed / aborted / error), not only the happy
+        one.
     """
     client_ip = http_request.client.host if http_request.client else "unknown"
     rate_stamp = _check_rate_limit(client_ip)
@@ -688,15 +781,24 @@ async def ask_ai_stream(request: UserRequest, http_request: Request):
             raise HTTPException(400, "Images only work in agent mode")
 
         file_logged = doc.name if doc else "None"
-        doc_context = _document_context(doc)
-        final_prompt = request.prompt + doc_context
+        # S3: uploaded-document context enters the same user turn —
+        # sanitize it too, then the raw prompt.
+        doc_context = _sanitize_prompt(_document_context(doc))
+        final_prompt = _sanitize_prompt(request.prompt) + doc_context
 
-        copilot_role = "copilot_gpu" if request.mode == "gpu" else "copilot_cpu"
+        # RA-08 (was half-fixed): resolve the effective tier BEFORE the
+        # cache check, mirroring /chat — a gpu request on a CPU-only host
+        # must downgrade to the cpu copilot instead of 503-ing on the gpu
+        # role's cache.
+        effective = request.mode
+        if effective == "gpu" and not HAS_GPU:
+            effective = "cpu"
+        copilot_role = "copilot_gpu" if effective == "gpu" else "copilot_cpu"
         if not has_model(role_key(copilot_role)):
-            raise HTTPException(503, f"{request.mode} copilot not cached")
+            raise HTTPException(503, f"{effective} copilot not cached")
 
         # Keep the event loop responsive while weights load / swap.
-        await anyio.to_thread.run_sync(_ensure_copilot, request.mode)
+        await anyio.to_thread.run_sync(_ensure_copilot, effective)
 
         messages = [
             {"role": "system", "content": "You are a highly capable coding assistant."},
@@ -710,7 +812,29 @@ async def ask_ai_stream(request: UserRequest, http_request: Request):
             tokenizer, skip_prompt=True, skip_special_tokens=True, timeout=300,
         )
 
-        def _run_generation() -> None:
+        # S2: set by the SSE loop the moment the client is gone.
+        abort_event = threading.Event()
+
+        # S1/S4: a generator thread runs model.generate() while a pump
+        # thread consumes the streamer and forwards tokens to the event
+        # loop through this queue. The handler runs on the same event
+        # loop that will iterate the SSE body, so this is the right loop
+        # to hand tokens to.
+        loop = asyncio.get_running_loop()
+        pump_queue: asyncio.Queue = asyncio.Queue()
+
+        def _emit(item) -> None:
+            """Thread-safe handoff: worker threads -> event loop."""
+            try:
+                loop.call_soon_threadsafe(pump_queue.put_nowait, item)
+            except RuntimeError:
+                pass     # event loop already shut down (server stopping)
+
+        # --- thread 1: run generate() (never consumes the streamer) ------
+        gen_error: list[str] = []        # first exception message, if any
+        gen_thread: threading.Thread | None = None   # bound in event_generator
+
+        def _run_generate() -> None:
             try:
                 with torch.inference_mode():
                     model.generate(
@@ -720,52 +844,116 @@ async def ask_ai_stream(request: UserRequest, http_request: Request):
                         temperature=0.6,
                         pad_token_id=tokenizer.eos_token_id,
                         streamer=streamer,
+                        stopping_criteria=_stop_criteria(abort_event),
                     )
-            except Exception:
+            except Exception as exc:                     # noqa: BLE001
                 log.exception("streaming generation failed")
+                gen_error.append(f"{type(exc).__name__}: {exc}")
+                # generate() died before transformers could signal the
+                # streamer — end() now or the pump blocks for the full
+                # 300 s streamer timeout while holding GEN_LOCK.
+                try:
+                    streamer.end()
+                except Exception:                       # noqa: BLE001
+                    pass
+
+        # --- thread 2: pump streamer tokens to the event loop ------------
+        def _pump_stream() -> None:
+            """Sole releaser of GEN_LOCK after dispatch. Accumulates the
+            tokens locally (the event loop may stop consuming at any
+            moment on client disconnect), audits every terminal path
+            (S4), then emits ('done'|'error', payload) + None."""
+            accumulated: list[str] = []
+            outcome = "error"           # overwritten below on success paths
+            try:
+                for tok in streamer:
+                    accumulated.append(tok)
+                    _emit(tok)
+                # generate() calls streamer.end() as its last act, so it
+                # is at most moments from returning here — but never
+                # release the lock while it might still touch the model.
+                gen_thread.join(timeout=_GEN_JOIN_TIMEOUT_S)
+                if gen_thread.is_alive():
+                    log.error(
+                        "generate() did not return within %ss of stream "
+                        "end — releasing GEN_LOCK anyway; a wedged "
+                        "generation must not 503 the server forever",
+                        _GEN_JOIN_TIMEOUT_S)
+                if gen_error:
+                    outcome = "error"
+                elif abort_event.is_set():
+                    outcome = "aborted"
+                else:
+                    outcome = "completed"
+            except Exception:                           # noqa: BLE001
+                log.exception("stream pump failed")
+                outcome = "error"
             finally:
                 try:
                     streamer.end()
-                except Exception:
+                except Exception:                       # noqa: BLE001
                     pass
+                full_reply = "".join(accumulated).strip()
+                try:
+                    # S4: audit every terminal path, not just the happy one.
+                    if outcome == "completed":
+                        logged_reply = full_reply or "(no output)"
+                    else:
+                        logged_reply = f"({outcome}: {full_reply})"
+                    log_to_db(request.mode.upper(), request.prompt,
+                              logged_reply, file_logged, client=client_ip)
+                except Exception:                       # noqa: BLE001
+                    log.warning("stream audit-log write failed")
                 # Sole releaser after dispatch.
                 _release_once("worker-finally")
+                if outcome == "error":
+                    _emit(("error", "generation failed — see server log"))
+                else:
+                    _emit(("done", full_reply))
+                _emit(None)
 
         async def event_generator():
-            nonlocal worker_dispatched
-            accumulated: list[str] = []
+            nonlocal worker_dispatched, gen_thread
             try:
-                thread = threading.Thread(target=_run_generation, daemon=True)
-                # Commit *before* start(): from this point only the worker
+                gen_thread = threading.Thread(target=_run_generate,
+                                               daemon=True)
+                pump_thread = threading.Thread(target=_pump_stream, daemon=True)
+                # Commit *before* start(): from this point only the pump
                 # may release GEN_LOCK. Eliminates dual-release race with
                 # BackgroundTask defensive cleanup.
                 worker_dispatched = True
-                thread.start()
-                # RA-02: TextIteratorStreamer.__next__ blocks on queue.get —
-                # never call it on the event-loop thread.
-                _it = iter(streamer)
-
-                def _next_token():
-                    try:
-                        return next(_it)
-                    except StopIteration:
-                        return None
+                gen_thread.start()
+                pump_thread.start()
 
                 while True:
-                    token = await anyio.to_thread.run_sync(_next_token)
-                    if token is None:
+                    # S1: pure await on the event loop — no threadpool hop
+                    # per token, so other requests keep their latency.
+                    item = await pump_queue.get()
+                    if item is None:
                         break
-                    accumulated.append(token)
-                    yield f"data: {json.dumps({'token': token})}\n\n"
-                full_reply = "".join(accumulated).strip()
-                log_to_db(request.mode.upper(), request.prompt, full_reply,
-                          file_logged, client=client_ip)
-                yield f"data: {json.dumps({'done': True, 'answer': full_reply})}\n\n"
+                    if isinstance(item, tuple):
+                        kind, payload = item
+                        if kind == "error":
+                            # Terminal failure frame — the client shows an
+                            # error instead of a silently truncated stream.
+                            yield f"data: {json.dumps({'error': payload})}\n\n"
+                            break
+                        # 'done' frame: authoritative full answer so the
+                        # client can replace any partially-rendered text.
+                        yield f"data: {json.dumps({'done': True, 'answer': payload})}\n\n"
+                        continue
+                    yield f"data: {json.dumps({'token': item})}\n\n"
             except GeneratorExit:
+                # S2: client disconnected — signal the generator now; the
+                # stopping criteria ends it at the next forward pass.
+                abort_event.set()
                 log.info(
-                    "client disconnected mid-stream; worker will "
-                    "release GEN_LOCK when generation completes"
+                    "client disconnected mid-stream; abort event set — "
+                    "generation stops at the next forward pass"
                 )
+                raise
+            except asyncio.CancelledError:
+                abort_event.set()
                 raise
 
         async def _defensive_cleanup() -> None:
@@ -839,9 +1027,14 @@ def ask_ai(request: UserRequest, http_request: Request) -> Dict[str, Any]:
                 )
         file_logged = doc.name if doc else (img.name if img else "None")
 
-        doc_context = _document_context(doc)
-        # Copilot tiers use concatenated prompt; agent routes on raw user text only.
-        final_prompt = request.prompt + doc_context
+        # S3: sanitize both the raw prompt and the RAG document context —
+        # control tokens in either can close the user turn early.
+        doc_context = _sanitize_prompt(_document_context(doc))
+        # Copilot tiers use concatenated prompt; agent routes on raw user
+        # text only (the router classifies, and the agent pipeline builds
+        # its own prompts — but the same sanitized text is used everywhere
+        # below so no raw control tokens reach any tokenizer).
+        final_prompt = _sanitize_prompt(request.prompt) + doc_context
 
         # --- TIER 3: AGENT WORKSTATION ---
         if request.mode == "agent":
@@ -853,7 +1046,7 @@ def ask_ai(request: UserRequest, http_request: Request) -> Dict[str, Any]:
                 _tier["current"] = "agent"
             try:
                 result = run_agentic_pipeline(
-                    request.prompt,
+                    _sanitize_prompt(request.prompt),
                     image_path=str(img) if img else None,
                     document_context=doc_context)
                 answer_text = (f"🤖 Agent Workstation "
@@ -936,11 +1129,16 @@ class NoCacheStaticFiles(StaticFiles):
         resp.headers["Cache-Control"] = "no-cache"
         resp.headers["X-Content-Type-Options"] = "nosniff"
         resp.headers["Referrer-Policy"] = "no-referrer"
-        # Minimal CSP for the glass UI (inline handlers are not used; scripts are same-origin)
+        # Minimal CSP for the glass UI (inline handlers are not used; scripts are same-origin).
+        # R10: connect-src can be extended for keyless ?server= tailnet
+        # overrides (e.g. SHELL_MIND_CSP_CONNECT="http://100.x.y.z:8000").
+        extra_connect = os.environ.get("SHELL_MIND_CSP_CONNECT", "").strip()
+        connect_src = "'self'" + (
+            f" {extra_connect}" if extra_connect else "")
         resp.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
-            "script-src 'self'; connect-src 'self'",
+            f"script-src 'self'; connect-src {connect_src}",
         )
         return resp
 

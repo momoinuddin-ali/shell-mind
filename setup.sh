@@ -148,10 +148,26 @@ if os.environ.get("_SM_KEY"):
 p.write_text("\n".join(f"{k}={v}" for k, v in data.items()) + "\n")
 p.chmod(0o600)
 '
+  # Normalize the pasted server value the same way the .env writer does —
+  # the probe must use the URL the user actually typed (scheme/port and
+  # all), not a hardcoded http://host:8000.
+  SRV_URL="$(printf '%s' "$SRV" | python3 -c '
+import sys
+from urllib.parse import urlparse
+raw = sys.stdin.read().strip()
+if "://" not in raw:
+    raw = "http://" + raw
+p = urlparse(raw)
+host = p.hostname or "localhost"
+if ":" in host and not host.startswith("["):
+    host = "[" + host + "]"
+port = p.port or 8000
+print((p.scheme or "http") + "://" + host + ":" + str(port))
+')"
   echo
-  if curl -fsS ${KEY:+-H "X-API-Key: $KEY"} "http://$SRV:8000/health" >/dev/null 2>&1; then
+  if curl -fsS ${KEY:+-H "X-API-Key: $KEY"} "$SRV_URL/health" >/dev/null 2>&1; then
     echo "✅ Server reachable — run: python cli.py"
-    echo "   Browser:  http://$SRV:8000"
+    echo "   Browser:  $SRV_URL"
   else
     echo "⚠ Not reachable yet — is the server running, and is your device on the tailnet?"
   fi

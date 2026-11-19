@@ -171,6 +171,61 @@ Z v1.2.1 third pass: **0 Critical / 0 High**, 13 smaller items. Independent revi
 
 **Live:** `python tests/test_server_contract.py` → **37 passed, 0 failed**.
 
+### Pre-viva re-audit — RA-01..14 + F-A / **v1.3.2** (`ac70db9`, 2026-11-17)
+
+Closes the round-5 pre-viva findings. Verified live before Wave D: RA-01
+(thread data-loss, two layers), RA-02 (blocking SSE loop), RA-03 (key
+exfil via `?server=`), RA-04 (purge leaves router resident), RA-06
+(IPv6/URL), RA-07 (COPILOT_IDS frozen at import), RA-10 (stream fallback
+duplicate generation), RA-11 (`/docs` exposure), RA-12 (resource nits),
+RA-13 (unknown fallback keys), R6 (upload type confusion). F-A ("corrupted
+CI filter") was a **false positive, withdrawn** after byte-checking the
+raw workflow file — the filter was correct all along; the workflow was
+rightly left untouched.
+
+### Wave D — pre-viva residuals + consistency / **v1.4.1**
+
+The viva-prep review re-listed the open Low/Info items; each was verified
+in code and the real ones closed:
+
+| Item | Status / Fix |
+|------|--------------|
+| **RA-08** (was half-fixed) | `/chat/stream` now resolves the effective tier (`gpu`→`cpu` downgrade on CPU-only hosts) *before* the cache check, mirroring `/chat` — was 503-ing on the gpu role's cache |
+| **R8** | orchestrator now requires `REGISTRY[role_key("vision")].vision` (capability flag), not just cache presence — a models.json remap of `vision` to a text-only model now refuses honestly |
+| **R9** | `updatedAt` was never *set* (dead sort key) and the 30-thread cap ran only in the quota-error catch — now stamped on every thread mutation (send / new chat) and the cap + message trim run proactively on every persist |
+| **R10** | CSP `connect-src` extensible via `SHELL_MIND_CSP_CONNECT` env (for keyless `?server=` tailnet overrides); default unchanged (`'self'`) |
+| **R12** | smoke-test coexistence check now asserts a VRAM floor (`SHELL_MIND_COEXIST_FLOOR_GB`, default 0.5 GB) instead of passing unconditionally |
+| setup.sh probe | used hardcoded `http://$SRV:8000` even when the user pasted a full URL → now normalized identically to the `.env` writer (scheme/port/IPv6 preserved) |
+| README consistency | uploads "returns the server-side path" → **opaque tokens** (matches PE); component tree now lists `setup.sh`, `models.example.json`, `.github/workflows`, `requirements-ci.txt`, `SYNOPSIS.md`, `SECURITY.md`, `LICENSE` |
+| **RA-13 non-string fallback** | verified **already fixed** at `ac70db9` (isinstance guard at load, model_zoo.py) — the checklist item was stale |
+| **F-B** aborted-stream audit | verified **closed by Wave C S4** — every terminal stream path (completed/aborted/error) writes the audit row |
+| **R5** (partial-cache heuristic) | remains open by design: full `index.json` shard-completeness check is v2.0 work; the ≥1 MB weight-files heuristic stays documented |
+
+Contract suite: **61 → 65 checks** (+4 Wave D: gpu→cpu stream downgrade,
+vision-capability gate under remap, default-flag sanity, raw-ASGI 411).
+**Live:** `python tests/test_server_contract.py` → **65 passed, 0 failed**
+(stable across repeated runs).
+
+### Wave C — streaming hardening (S1–S4) / **v1.4**
+
+Fixes the three streaming limitations the README had documented for v2.0,
+plus one audit gap found during the review.
+
+| Item | Before → After |
+|------|----------------|
+| **S1** per-token latency | `anyio.to_thread.run_sync` per token (~50–100 ms event-loop hit during streams) → generator thread + pump thread; the event loop only awaits an `asyncio.Queue` fed via `call_soon_threadsafe`. No threadpool hops per token |
+| **S2** disconnect behavior | generation ran to the full 1500-token budget after disconnect → `abort_event` + torch `StoppingCriteria` ends generation at the next forward pass; `GEN_LOCK` released promptly (with a `_GEN_JOIN_TIMEOUT_S=30` failsafe if `generate()` wedges) |
+| **S3** prompt sanitization | raw prompt + RAG context concatenated unsanitized → `_sanitize_prompt()` neutralizes ChatML control tokens (`<\|im_end\|>`, `<\|endoftext\|>`, `<think>`, …) in `/chat`, `/chat/stream`, and the agent pipeline |
+| **S4** audit coverage (found in review) | streams audited only on the happy path — failed/aborted streams left no audit row → every terminal path (`completed` / `aborted` / `error`) writes the interaction |
+| Contract suite | **61** checks (was 43): +18 Wave C checks — sanitizer unit + end-to-end (prompt, doc context, stream), stop-criterion behavior, stream audit happy/error paths, `GEN_LOCK` release after failure, pump/done/error SSE frames |
+
+SSE protocol addition: a terminal `data: {"error": …}` frame on generation
+failure, so clients show an error instead of a silently truncated stream
+(the web UI falls back to `/chat` on empty streams already). The `'done'`
+frame keeps its `{"done": true, "answer": …}` shape.
+
+**Live:** `python tests/test_server_contract.py` → **61 passed, 0 failed** (stable across repeated runs).
+
 ---
 
 ## Streaming — branch `v1.1-professional` (Md Imtiyaz)
@@ -210,7 +265,7 @@ After the lock fix:
 - No server-side chat memory (`localStorage` threads)  
 - Vision OCR quality under 4-bit 8B on dense diagrams  
 - Self-host / team Tailscale — not multi-tenant SaaS  
-- Stream continues GPU work after client disconnect until worker ends  
+- ~~Stream continues GPU work after client disconnect until worker ends~~ — fixed in Wave C (S2): abort event honored at the next forward pass; abort granularity of one forward pass remains
 
 ---
 
@@ -252,7 +307,8 @@ Full history: `git log --oneline --date=short --pretty=format:'%ad %h %an %s'`
 
 ## Next
 
-- [ ] Land stream **GEN_LOCK** single-releaser on the stream branch; re-run contract tests  
-- [ ] Merge `v1.1-professional` → `main` (fast-forward once lock fix is on the branch)  
-- [ ] Tag **v1.3.1** (stream + lock protocol) when green  
-- [ ] Wave C / roadmap: agent streaming, GGUF/coder30, smaller VL, vector RAG  
+- [x] Land stream **GEN_LOCK** single-releaser on the stream branch; re-run contract tests  
+- [x] Merge `v1.1-professional` → `main` (fast-forward once lock fix is on the branch)  
+- [x] Tag **v1.3.1** (stream + lock protocol) when green  
+- [x] Wave C (S1–S4): pump-thread streaming, abort-on-disconnect, prompt sanitization, audit on all stream exits — 61 contract checks green  
+- [ ] Roadmap: agent streaming, GGUF/coder30, smaller VL, vector RAG
